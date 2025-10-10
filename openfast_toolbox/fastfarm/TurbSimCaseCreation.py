@@ -124,6 +124,10 @@ class TSCaseCreation:
         if self.ds_low is None:
             self.ds_low = self.Cmeander*self.D*self.URef/150
 
+        # Spatial resolution for high-res
+        if self.ds_high is None:
+            self.ds_high = self.cmax
+
         self.dy = np.floor(self.ds_low/self.ds_high)*self.ds_high
         self.dz = np.floor(self.ds_low/self.ds_high)*self.ds_high
         self.dt = self.dt_low

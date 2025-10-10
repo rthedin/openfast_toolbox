@@ -507,7 +507,7 @@ class FFCaseCreation:
             mod_wake_str = ['','polar', 'curled', 'cartesian']
             print(f'WARNING: One or more temporal or spatial resolution for low- and high-res domains were not given.')
             print(f'         Estimated values for {mod_wake_str[self.mod_wake]} wake model shown below.')
-            self._determine_resolutions_from_dummy_amrwind_grid()
+            # self._determine_resolutions_from_dummy_amrwind_grid()
             
         # Check the temporal and spatial resolutions if provided
         if self.dt_low != None and self.dt_high!= None:
@@ -1289,7 +1289,7 @@ class FFCaseCreation:
                 self.turbfilename = value
 
             elif key == 'libdisconfilepath':
-                if not value.endswith('.so'):
+                if not value.endswith('.so') and not value.endswith('.dylib'):
                     raise ValueError(f'The libdiscon file should end in "*.so"')
                 if os.path.isabs(value):
                     self.libdisconfilepath = value
@@ -2148,41 +2148,42 @@ class FFCaseCreation:
 
 
         # Planes to save in FAST.Farm. We want the planes through the original farm, so let's get the position of the turbines at wdir=0
-        alignedTurbs = self.allCases.where(self.allCases['inflow_deg']==0, drop=True).isel(case=0)
-        if self.inflowStr == 'TurbSim':
-            # Turbine location in TurbSim reference frame
-            xWT = alignedTurbs['Tx'].values + self.xoffset_turbsOrigin2TSOrigin
-            yWT = alignedTurbs['Ty'].values + self.yoffset_turbsOrigin2TSOrigin
-        elif self.inflowStr == 'LES':
-            # Turbine location in LES reference frame
-            xWT = alignedTurbs['Tx'].values
-            yWT = alignedTurbs['Ty'].values
-        
-        offset=10
-        planes_xy = [self.zhub+self.zbot]
-        planes_yz = np.unique(np.round(xWT+offset, 2))
-        planes_xz = np.unique(np.round(yWT, 2))
-        
-        # Number of planes must be at most 9
-        self.planes_xy = planes_xy[0:9]
-        self.planes_yz = planes_yz[0:9]
-        self.planes_xz = planes_xz[0:9]      
+        if self.allCases['inflow_deg']==0:
+            alignedTurbs = self.allCases.where(self.allCases['inflow_deg']==0, drop=True).isel(case=0)
+            if self.inflowStr == 'TurbSim':
+                # Turbine location in TurbSim reference frame
+                xWT = alignedTurbs['Tx'].values + self.xoffset_turbsOrigin2TSOrigin
+                yWT = alignedTurbs['Ty'].values + self.yoffset_turbsOrigin2TSOrigin
+            elif self.inflowStr == 'LES':
+                # Turbine location in LES reference frame
+                xWT = alignedTurbs['Tx'].values
+                yWT = alignedTurbs['Ty'].values
+            
+            offset=10
+            planes_xy = [self.zhub+self.zbot]
+            planes_yz = np.unique(np.round(xWT+offset, 2))
+            planes_xz = np.unique(np.round(yWT, 2))
+            
+            # Number of planes must be at most 9
+            self.planes_xy = planes_xy[0:9]
+            self.planes_yz = planes_yz[0:9]
+            self.planes_xz = planes_xz[0:9]      
         
         if self.inflowStr == 'LES':
             self._FF_setup_LES(**kwargs)
 
         elif self.inflowStr == 'TurbSim':
-            # We need to make sure the TurbSim boxes have been executed. Let's check the last line of the logfile
-            highboxlog_path = os.path.join(self.path, self.condDirList[0], self.caseDirList[0], 'Seed_0', 'TurbSim', 'log.hight1.seed0.txt')
-            if not os.path.isfile(highboxlog_path):
-                raise ValueError(f'All TurbSim boxes need to be completed before this step can be done.')
+            # # We need to make sure the TurbSim boxes have been executed. Let's check the last line of the logfile
+            # highboxlog_path = os.path.join(self.path, self.condDirList[0], self.caseDirList[0], 'Seed_0', 'TurbSim', 'log.hight1.seed0.txt')
+            # if not os.path.isfile(highboxlog_path):
+            #     raise ValueError(f'All TurbSim boxes need to be completed before this step can be done.')
 
-            with open(highboxlog_path) as f:
-                last = None
-                for last in (line for line in f if line.rstrip('\n')):  pass
+            # with open(highboxlog_path) as f:
+            #     last = None
+            #     for last in (line for line in f if line.rstrip('\n')):  pass
 
-            if last is None or 'TurbSim terminated normally' not in last:
-                raise ValueError(f'All TurbSim boxes need to be completed before this step can be done.')
+            # if last is None or 'TurbSim terminated normally' not in last:
+            #     raise ValueError(f'All TurbSim boxes need to be completed before this step can be done.')
 
             self._FF_setup_TS(**kwargs)
 
