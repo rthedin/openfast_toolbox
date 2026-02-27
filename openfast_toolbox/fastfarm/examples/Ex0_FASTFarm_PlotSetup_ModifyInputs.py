@@ -15,7 +15,7 @@ scriptDir = os.path.dirname(__file__)
 
 def main(test=False):
 
-    FFfilepath = os.path.join(scriptDir, '../../../data/IEA15MW/FF.fstf')
+    FFfilepath = os.path.join(scriptDir, '../../../data/IEA15MW/v4/FF.fstf')
 
 
     # --- 0.2 Read and Modify an existing FAST.Farm file
