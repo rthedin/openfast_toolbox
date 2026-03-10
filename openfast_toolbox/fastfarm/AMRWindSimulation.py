@@ -84,8 +84,8 @@ class AMRWindSimulation:
         self.verbose            = verbose
 
         # Placeholder variables, to be calculated by FFCaseCreation
-        self.output_frequency_lr = None
-        self.output_frequency_hr = None
+        self.output_interval_lr = None
+        self.output_interval_hr = None
         self.sampling_labels_lr = None
         self.sampling_labels_hr = None
         self.nx_lr = None
@@ -131,7 +131,7 @@ class AMRWindSimulation:
         s += f'\n'
         s += f'Low-res domain: \n'
         s += f' - ds low: {self.ds_low_les} m\n'
-        s += f' - dt low: {self.dt_low_les} s (with LES dt = {self.dt} s, output frequency is {self.output_frequency_lr})\n'
+        s += f' - dt low: {self.dt_low_les} s (with LES dt = {self.dt} s, output interval is {self.output_interval_lr})\n'
         s += f' - Sampling labels: {self.sampling_labels_lr}\n'
         s += f' - Extents: ({self.xdist_lr}, {self.ydist_lr}, {self.zdist_lr}) m\n'
         s += f'   - x: {self.xlow_lr}:{self.ds_low_les}:{self.xhigh_lr} m,\t  ({self.nx_lr} points at level {self.level_lr})\n'
@@ -141,7 +141,7 @@ class AMRWindSimulation:
         s += f'\n'
         s += f'High-res domain: \n'
         s += f' - ds high: {self.ds_high_les} m\n'
-        s += f' - dt high: {self.dt_high_les} s (with LES dt = {self.dt} s, output frequency is {self.output_frequency_hr})\n'
+        s += f' - dt high: {self.dt_high_les} s (with LES dt = {self.dt} s, output interval is {self.output_interval_hr})\n'
         s += f' - Sampling labels: {self.sampling_labels_hr}\n'
         for t in np.arange(len(self.hr_domains)):
             s += f" - Turbine {t}, base located at ({self.wts[t]['x']:.2f}, {self.wts[t]['y']:.2f}, {self.wts[t]['z']:.2f}), hub height of {self.wts[t]['zhub']} m\n"
@@ -309,13 +309,16 @@ class AMRWindSimulation:
             raise ValueError(f"Low resolution timestep ({self.dt_low_les}) is finer than high resolution timestep ({self.dt_high_les})!")
 
 
-        # Sampling frequency
-        self.output_frequency_hr = int(np.floor(round(self.dt_high_les/self.dt,4)))
-        self.output_frequency_lr = getMultipleOf(self.dt_low_les/self.dt, multipleof=self.output_frequency_hr)
+        # Sampling interval
+        self.output_interval_hr = int(np.floor(round(self.dt_high_les/self.dt,4)))
+        self.output_interval_lr = getMultipleOf(self.dt_low_les/self.dt, multipleof=self.output_interval_hr)
 
-        if self.output_frequency_lr % self.output_frequency_hr != 0:
-            raise ValueError(f"Low resolution output frequency of {self.output_frequency_lr} not a multiple of the high resolution frequency {self.output_frequency_hr}!")
+        if self.output_interval_lr % self.output_interval_hr != 0:
+            raise ValueError(f"Low resolution output interval of {self.output_interval_lr} not a multiple of the high resolution interval {self.output_interval_hr}!")
 
+        # Convert sampling interval to sampling time interval
+        self.output_time_interval_hr = float(np.round(self.output_interval_hr * self.dt, decimals=10))
+        self.output_time_interval_lr = float(np.round(self.output_interval_lr * self.dt, decimals=10))
 
 
     def _calc_grid_resolution(self):
@@ -645,7 +648,7 @@ class AMRWindSimulation:
 
 
 
-    def write_sampling_params(self, out=None, format='netcdf', terrain=None, overwrite=False):
+    def write_sampling_params(self, out=None, format='netcdf', terrain=None, overwrite=False, chunk_size_vec=(8,8,1)):
         '''
         Write out text that can be used for the sampling planes in an 
           AMR-Wind input file
@@ -655,16 +658,21 @@ class AMRWindSimulation:
             to. If None, result is written to screen.
         format: str
             Format requested for the output to be saved from AMR-Wind. Options are
-            native and netcdf
+            native, netcdf, amrex_erf, or amrex_amrwind
         terrain: bool (required)
             If the case contains terrain. If it does, mu_turb will also be requested. This
             is necessary to process terrain files and set NaN inside the terrain.
         overwrite: bool
             If saving to a file, whether or not to overwrite potentially
             existing file
+        chunk_size_vec: vector of int
+            Size of AMReX-based chunk, used with the sub-volume sampling.
+
         '''
-        if format not in ['netcdf','native']:
-            raise ValueError(f'format should be either native or netcdf')
+
+        if format not in ['netcdf','native','amrex_erf','amrex_amrwind']:
+            raise ValueError(f'format should be one of: native, netcdf, amrex_erf, amrex_amrwind')
+        self.sampling_format = format
 
         if terrain == True:
             fields = 'velocity mu_turb'
@@ -673,25 +681,70 @@ class AMRWindSimulation:
         else:
             raise ValueError(f'The `terrain` input should be explicitly set to True or False')
 
-        # Write time step information for consistenty with sampling frequency
-        s = f"time.fixed_dt    = {self.dt}\n\n"
-        # Write flow velocity info for consistency
-        s += f"incflo.velocity = {self.incflo_velocity_hh[0]} {self.incflo_velocity_hh[1]} {self.incflo_velocity_hh[2]}\n\n\n"
+        if self.sampling_format == 'amrex_erf':
+            s  = f"#¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨#\n"
+            s += f"#         ERF SUBVOLUME OUTPUT          #\n"
+            s += f"#.......................................#\n"
+            s += f"# Sampling info generated by AMRWindSamplingCreation.py on {self.curr_datetime}\n"
+            s += f"erf.fixed_dt          = {self.dt}\n\n"
+            s += self._write_sampling_params_amrex_erf(fields, chunk_size_vec)
+        elif self.sampling_format == 'amrex_amrwind':
+            # Write time step information for consistency with sampling interval
+            s = f"time.fixed_dt    = {self.dt}\n\n"
+            # Write flow velocity info for consistency
+            s += f"incflo.velocity = {self.incflo_velocity_hh[0]} {self.incflo_velocity_hh[1]} {self.incflo_velocity_hh[2]}\n\n\n"
 
-        # Write high-level info for sampling
+            s += f"#¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨#\n"
+            s += f"#       AMRWIND AMREX SAMPLING          #\n"
+            s += f"#.......................................#\n"
+            s += f"# Sampling info generated by AMRWindSamplingCreation.py on {self.curr_datetime}\n"
+            s += f"incflo.post_processing                = {self.postproc_name_lr} {self.postproc_name_hr} # averaging\n\n\n"
+            s += self._write_sampling_params_amrex_amrwind(fields, chunk_size_vec)
+        else:
+            # Write time step information for consistency with sampling interval
+            s = f"time.fixed_dt    = {self.dt}\n\n"
+            # Write flow velocity info for consistency
+            s += f"incflo.velocity = {self.incflo_velocity_hh[0]} {self.incflo_velocity_hh[1]} {self.incflo_velocity_hh[2]}\n\n\n"
+
+            # Write high-level info for sampling
+            s += f"#¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨#\n"
+            s += f"#          POST-PROCESSING              #\n"
+            s += f"#.......................................#\n"
+            s += f"# Sampling info generated by AMRWindSamplingCreation.py on {self.curr_datetime}\n"
+            s += f"incflo.post_processing                = {self.postproc_name_lr} {self.postproc_name_hr} # averaging\n\n\n"
+            s += self._write_sampling_params_netcdfnative(fields)
+
+        if out is None:
+            return s
+        elif os.path.isdir(out):
+            outfile = os.path.join(out, 'sampling_config.i')
+        else: 
+            # full file given
+            outfile = out
+            if not os.path.exists(os.path.dirname(outfile)):
+                os.makedirs(os.path.dirname(outfile))
+            if not overwrite:
+                if os.path.isfile(outfile):
+                    raise FileExistsError(f"{str(outfile)} already exists! Aborting...")
+
+        with open(outfile,"w") as out:
+            out.write(s)
+
+
+
+    def _write_sampling_params_netcdfnative(self, fields):
+
         sampling_labels_lr_str = " ".join(str(item) for item in self.sampling_labels_lr)
         sampling_labels_hr_str = " ".join(str(item) for item in self.sampling_labels_hr)
-        s += f"#¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨¨#\n"
-        s += f"#          POST-PROCESSING              #\n"
-        s += f"#.......................................#\n"
-        s += f"# Sampling info generated by AMRWindSamplingCreation.py on {self.curr_datetime}\n"
-        s += f"incflo.post_processing                = {self.postproc_name_lr} {self.postproc_name_hr} # averaging\n\n\n"
+        output_time_interval_lr_str = f"{self.output_time_interval_lr:.10f}".rstrip('0').rstrip('.')
+        output_time_interval_hr_str = f"{self.output_time_interval_hr:.10f}".rstrip('0').rstrip('.')
 
-        s += f"# ---- Low-res sampling parameters ----\n"
-        s += f"{self.postproc_name_lr}.output_format    = {format}\n"
-        s += f"{self.postproc_name_lr}.output_frequency = {self.output_frequency_lr}\n"
-        s += f"{self.postproc_name_lr}.fields           = {fields}\n"
-        s += f"{self.postproc_name_lr}.labels           = {sampling_labels_lr_str}\n\n"
+        s  = f"# ---- Low-res sampling parameters ----\n"
+        s += f"{self.postproc_name_lr}.output_format           = {self.sampling_format}\n"
+        s += f"{self.postproc_name_lr}.output_after_final_step = false\n"
+        s += f"{self.postproc_name_lr}.output_time_interval    = {output_time_interval_lr_str}\n"
+        s += f"{self.postproc_name_lr}.fields                  = {fields}\n"
+        s += f"{self.postproc_name_lr}.labels                  = {sampling_labels_lr_str}\n\n"
 
         # Write out low resolution sampling plane info
         zoffsets_lr_str = " ".join(str(item) for item in self.zoffsets_lr)
@@ -706,10 +759,11 @@ class AMRWindSimulation:
         s += f"{self.postproc_name_lr}.Low.offsets       = {zoffsets_lr_str}\n\n\n"
 
         s += f"# ---- High-res sampling parameters ----\n"
-        s += f"{self.postproc_name_hr}.output_format     = {format}\n"
-        s += f"{self.postproc_name_hr}.output_frequency  = {self.output_frequency_hr}\n"
-        s += f"{self.postproc_name_hr}.fields            = {fields}\n"
-        s += f"{self.postproc_name_hr}.labels            = {sampling_labels_hr_str}\n"
+        s += f"{self.postproc_name_hr}.output_format           = {self.sampling_format}\n"
+        s += f"{self.postproc_name_hr}.output_after_final_step = false\n"
+        s += f"{self.postproc_name_hr}.output_time_interval    = {output_time_interval_hr_str}\n"
+        s += f"{self.postproc_name_hr}.fields                  = {fields}\n"
+        s += f"{self.postproc_name_hr}.labels                  = {sampling_labels_hr_str}\n"
 
         # Write out high resolution sampling plane info
         for turbkey in self.hr_domains:
@@ -742,23 +796,167 @@ class AMRWindSimulation:
             s += f"{self.postproc_name_hr}.{sampling_name}.offset_vector = 0.0 0.0 1.0\n"
             s += f"{self.postproc_name_hr}.{sampling_name}.offsets       = {zoffsets_hr_str}\n"
 
+        return s
 
-        if out is None:
-            print(s)
-            return
-        elif os.path.isdir(out):
-            outfile = os.path.join(out, 'sampling_config.i')
-        else: 
-            # full file given
-            outfile = out
-            if not os.path.exists(os.path.dirname(outfile)):
-                os.makedirs(os.path.dirname(outfile))
-            if not overwrite:
-                if os.path.isfile(outfile):
-                    raise FileExistsError(f"{str(outfile)} already exists! Aborting...")
 
-        with open(outfile,"w") as out:
-            out.write(s)
+    def _write_sampling_params_amrex_erf(self, fields, chunk_size_vec):
+        def _to_erf_sampling_vars(fields_in):
+            vars_out = []
+            for field in fields_in.split():
+                if field == 'velocity':
+                    vars_out.extend(['x_velocity', 'y_velocity', 'z_velocity'])
+                else:
+                    vars_out.append(field)
+            return " ".join(vars_out)
+
+        # ERF subvolume sampling uses cell-corner origins.
+        # Internal placement in this class stores cell-centered origins, so shift by half
+        # of the AMR-Wind cell size at the corresponding level.
+        xlow_lr_corner = self.xlow_lr - 0.5 * self.dx_at_lr_level
+        ylow_lr_corner = self.ylow_lr - 0.5 * self.dy_at_lr_level
+        zlow_lr_corner = self.zlow_lr - 0.5 * self.dz_at_lr_level
+
+        origins = [f"{xlow_lr_corner:.4f} {ylow_lr_corner:.4f} {zlow_lr_corner:.4f}"]
+        nxnynz = [f"{self.nx_lr} {self.ny_lr} {self.nz_lr}"]
+        dxdydz = [f"{self.ds_low_les} {self.ds_low_les} {self.ds_low_les}"]
+
+        s  = f"# ---- ERF subvolume sampling parameters ----\n"
+        s += f"# Order of boxes in origin/nxnynz/dxdydz: low-res first, then each high-res turbine box\n"
+
+        for turbkey in self.hr_domains:
+            xlow_hr_corner = self.hr_domains[turbkey]['xlow_hr'] - 0.5 * self.dx_at_hr_level
+            ylow_hr_corner = self.hr_domains[turbkey]['ylow_hr'] - 0.5 * self.dy_at_hr_level
+            zlow_hr_corner = self.hr_domains[turbkey]['zlow_hr'] - 0.5 * self.dz_at_hr_level
+
+            origins.append(f"{xlow_hr_corner:.4f} {ylow_hr_corner:.4f} {zlow_hr_corner:.4f}")
+            nxnynz.append(
+                f"{self.hr_domains[turbkey]['nx_hr']} {self.hr_domains[turbkey]['ny_hr']} {self.hr_domains[turbkey]['nz_hr']}"
+            )
+            dxdydz.append(f"{self.ds_high_les} {self.ds_high_les} {self.ds_high_les}")
+
+        erf_sampling_vars = _to_erf_sampling_vars(fields)
+        subvol_file = os.path.join('post_processing',f"{self.postproc_name_lr}_{self.postproc_name_hr}") # TODO fix
+
+        s += f"erf.subvol_file          = \"{subvol_file}\"\n"
+        s += f"erf.subvol_int           = {self.output_interval_lr} {self.output_interval_hr}\n"
+        s += f"erf.subvol_sampling_vars = {erf_sampling_vars}\n"
+        s += f"erf.subvol.origin        = {'       '.join(origins)}\n"
+        s += f"erf.subvol.nxnynz        = {'       '.join(nxnynz)}\n"
+        s += f"erf.subvol.dxdydz        = {'       '.join(dxdydz)}\n"
+        s += f"erf.subvol.chunk_size    = {chunk_size_vec[0]} {chunk_size_vec[1]} {chunk_size_vec[2]}\n"
+
+        return s
+
+
+    def _write_sampling_params_amrex_amrwind(self, fields, chunk_size_vec):
+
+        # Here we need to modify the labels so that is consistent with ERF-based AMReX samping
+        sampling_labels_lr = ['0_']
+        sampling_labels_hr = [f"{i+1}_" for i, s in enumerate(self.sampling_labels_hr)]
+
+        sampling_labels_lr_str = " ".join(str(item) for item in sampling_labels_lr)
+        sampling_labels_hr_str = " ".join(str(item) for item in sampling_labels_hr)
+        output_time_interval_lr_str = f"{self.output_time_interval_lr:.10f}".rstrip('0').rstrip('.')
+        output_time_interval_hr_str = f"{self.output_time_interval_hr:.10f}".rstrip('0').rstrip('.')
+
+        is_lr_aligned = (
+            np.isclose(self.dx_at_lr_level, self.ds_low_les)
+            and np.isclose(self.dy_at_lr_level, self.ds_low_les)
+            and np.isclose(self.dz_at_lr_level, self.ds_low_les)
+        )
+        if not is_lr_aligned:
+            raise ValueError(
+                "amrex_amrwind sampling requires low-res AMR cell spacing to match sampling spacing. "
+                f"Received dx/dy/dz at level {self.level_lr} = ({self.dx_at_lr_level}, {self.dy_at_lr_level}, {self.dz_at_lr_level}) "
+                f"and ds_low_les = {self.ds_low_les}."
+            )
+
+        is_hr_aligned = (
+            np.isclose(self.dx_at_hr_level, self.ds_high_les)
+            and np.isclose(self.dy_at_hr_level, self.ds_high_les)
+            and np.isclose(self.dz_at_hr_level, self.ds_high_les)
+        )
+        if not is_hr_aligned:
+            raise ValueError(
+                "amrex_amrwind sampling requires high-res AMR cell spacing to match sampling spacing. "
+                f"Received dx/dy/dz at level {self.level_hr} = ({self.dx_at_hr_level}, {self.dy_at_hr_level}, {self.dz_at_hr_level}) "
+                f"and ds_high_les = {self.ds_high_les}."
+            )
+
+        #sampleAt = 'cell_centers'
+        sampleAt = 'cell_corners'
+
+        if sampleAt == 'cell_centers':
+            xlow_lr_out = self.xlow_lr
+            ylow_lr_out = self.ylow_lr
+            zlow_lr_out = self.zlow_lr
+            xshift_hr = 0.0
+            yshift_hr = 0.0
+            zshift_hr = 0.0
+            origin_comment = 'cell centers'
+        elif sampleAt == 'cell_corners':
+            xlow_lr_out = self.xlow_lr - 0.5 * self.dx_at_lr_level
+            ylow_lr_out = self.ylow_lr - 0.5 * self.dy_at_lr_level
+            zlow_lr_out = self.zlow_lr - 0.5 * self.dz_at_lr_level
+            xshift_hr = -0.5 * self.dx_at_hr_level
+            yshift_hr = -0.5 * self.dy_at_hr_level
+            zshift_hr = -0.5 * self.dz_at_hr_level
+            origin_comment = 'cell corners'
+        else:
+            raise ValueError(f"Unknown sampleAt='{sampleAt}'. Expected 'cell_centers' or 'cell_corners'.")
+
+        s  = f"# ---- Low-res sampling parameters ----\n"
+        s += f"{self.postproc_name_lr}.type                    = Subvolume\n"
+        s += f"{self.postproc_name_lr}.output_rename           = ffboxes\n"
+        s += f"{self.postproc_name_lr}.output_after_final_step = false\n"
+        s += f"{self.postproc_name_lr}.output_time_interval    = {output_time_interval_lr_str}\n"
+        s += f"{self.postproc_name_lr}.fields                  = {fields}\n"
+        s += f"{self.postproc_name_lr}.labels                  = {sampling_labels_lr_str}\n\n"
+
+        s += f"# Low sampling grid spacing = {self.ds_lr} m\n"
+        s += f"{self.postproc_name_lr}.{sampling_labels_lr_str}.type           = Rectangular\n"
+        s += f"{self.postproc_name_lr}.{sampling_labels_lr_str}.origin         = {xlow_lr_out:.4f} {ylow_lr_out:.4f} {zlow_lr_out:.4f} # {origin_comment}\n"
+        s += f"{self.postproc_name_lr}.{sampling_labels_lr_str}.num_points     = {self.nx_lr} {self.ny_lr} {self.nz_lr}\n"
+        s += f"{self.postproc_name_lr}.{sampling_labels_lr_str}.dx_vec         = {self.ds_low_les} {self.ds_low_les} {self.ds_low_les}\n"
+        s += f"{self.postproc_name_lr}.{sampling_labels_lr_str}.chunk_size_vec = {chunk_size_vec[0]} {chunk_size_vec[1]} {chunk_size_vec[2]}\n\n\n"
+
+        s += f"# ---- High-res sampling parameters ----\n"
+        s += f"{self.postproc_name_hr}.type                    = Subvolume\n"
+        s += f"{self.postproc_name_hr}.output_rename           = ffboxes\n"
+        s += f"{self.postproc_name_hr}.output_after_final_step = false\n"
+        s += f"{self.postproc_name_hr}.output_time_interval    = {output_time_interval_hr_str}\n"
+        s += f"{self.postproc_name_hr}.fields                  = {fields}\n"
+        s += f"{self.postproc_name_hr}.labels                  = {sampling_labels_hr_str}\n"
+
+        for turbkey in self.hr_domains:
+            wt_x = self.wts[turbkey]['x']
+            wt_y = self.wts[turbkey]['y']
+            wt_z = self.wts[turbkey]['z']
+            wt_h = self.wts[turbkey]['zhub']
+            wt_D = self.wts[turbkey]['D']
+            if 'name' in self.wts[turbkey].keys():
+                wt_name = self.wts[turbkey]['name']
+            else:
+                wt_name = f'T{turbkey+1}'
+            sampling_name = sampling_labels_hr[turbkey]
+            nx_hr = self.hr_domains[turbkey]['nx_hr']
+            ny_hr = self.hr_domains[turbkey]['ny_hr']
+            nz_hr = self.hr_domains[turbkey]['nz_hr']
+            xlow_hr = self.hr_domains[turbkey]['xlow_hr']
+            ylow_hr = self.hr_domains[turbkey]['ylow_hr']
+            zlow_hr = self.hr_domains[turbkey]['zlow_hr']
+            xlow_hr_out = xlow_hr + xshift_hr
+            ylow_hr_out = ylow_hr + yshift_hr
+            zlow_hr_out = zlow_hr + zshift_hr
+
+            s += f"\n# Turbine {wt_name} with base at (x,y,z) = ({wt_x:.4f}, {wt_y:.4f}, {wt_z:.4f}), with hh = {wt_h}, D = {wt_D}, grid spacing = {self.ds_hr} m\n"
+            s += f"{self.postproc_name_hr}.{sampling_name}.type           = Rectangular\n"
+            s += f"{self.postproc_name_hr}.{sampling_name}.origin         = {xlow_hr_out:.4f} {ylow_hr_out:.4f} {zlow_hr_out:.4f}  # {origin_comment}\n"
+            s += f"{self.postproc_name_hr}.{sampling_name}.num_points     = {nx_hr} {ny_hr} {nz_hr}\n"
+            s += f"{self.postproc_name_hr}.{sampling_name}.dx_vec         = {self.ds_high_les} {self.ds_high_les} {self.ds_high_les}\n"
+            s += f"{self.postproc_name_hr}.{sampling_name}.chunk_size_vec = {chunk_size_vec[0]} {chunk_size_vec[1]} {chunk_size_vec[2]}\n"
+
+        return s
 
 
 

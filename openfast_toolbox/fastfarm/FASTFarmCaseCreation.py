@@ -1,6 +1,7 @@
 import pandas as pd
 import os, sys, shutil
 import subprocess
+import warnings
 from contextlib import contextmanager
 import numpy as np
 import xarray as xr
@@ -252,8 +253,10 @@ class FFCaseCreation:
         seedValues: list of int
             Seed value for each seed of requested TurbSim simulations if nSeeds!=6
         inflowType: str
-            Inflow type (LES or TS) This variable will dictate whether it is a TurbSim-driven or LES-driven case
-            Choose 'LES' or 'TS' (no default is set)
+            Inflow type (LES_VTK/LES_AMReX or TS) This variable will dictate whether it is a TurbSim-driven or LES-driven case.
+            LES cases can be given by VTK-based input or AMReX-based input.
+            Choose 'LES_VTK', 'LES_AMReX', or 'TS' (no default is set).
+            Backward compatibility: 'LES' is accepted and mapped to 'LES_VTK' with a deprecation warning.
         inflowPath: str or list of strings
             Full path of the LES data, if driven by LES. If None, the setup will be for TurbSim inflow.
             inflowPath can be a single path, or a list of paths of the same length as the sweep in conditions.
@@ -736,17 +739,37 @@ class FFCaseCreation:
                                7693202, 587924, 890090, 435646, -454899, -785138, -78564, -17944, -99021, 389432]
             self.seedValues = self.seedValues[:self.nSeeds]
         if len(self.seedValues) != self.nSeeds:
-            raise ValueError(f'The array seedValues has been passed, but its length does not correspond '\
+            raise ValueError(f'The array seedValues has been passed, but its length does not corraaespond '\
                              f'to the number of seeds requested.')
+
+        if not isinstance(self.inflowType, str):
+            raise ValueError(f"Inflow type `inflowType` should be a string. Received {type(self.inflowType)}.")
+
+        if self.inflowType.lower() == 'ts':
+            self.inflowType = 'TS'
+        elif self.inflowType.lower() == 'les':
+            deprec_msg = "inflowType='LES' is deprecated and will be removed in a future release. Use inflowType='LES_VTK'. Mapping to 'LES_VTK'."
+            if self.verbose > 0:
+                WARN(deprec_msg)
+            warnings.warn(deprec_msg, DeprecationWarning, stacklevel=2)
+            self.inflowType = 'LES_VTK'
+        elif self.inflowType.lower() == 'les_vtk':
+            self.inflowType = 'LES_VTK'
+        elif self.inflowType.lower() == 'les_amrex':
+            self.inflowType = 'LES_AMReX'
   
         # Check LES parameters
         if self.inflowType == 'TS':
             self.inflowStr = 'TurbSim'
             self.Mod_AmbWind = 3
-        elif self.inflowType == 'LES':
+        elif self.inflowType in ['LES_VTK', 'LES_AMReX']:
             if isinstance(self.inflowPath,str): self.inflowPath = [self.inflowPath]*len(self.vhub)
-            self.inflowStr = 'LES'
-            self.Mod_AmbWind = 1
+            if self.inflowType == 'LES_VTK':
+                self.inflowStr = 'LES_VTK'
+                self.Mod_AmbWind = 1
+            else:
+                self.inflowStr = 'LES_AMReX'
+                self.Mod_AmbWind = 4
             for p in self.inflowPath:
                 if not os.path.isdir(p):
                     WARN(f'The LES path {p} does not exist')
@@ -755,7 +778,7 @@ class FFCaseCreation:
                 raise ValueError (f'An LES-driven case was requested, but one or more grid parameters were not given. '\
                                    'Set `dt_high`, `ds_high`, `dt_low`, and `ds_low` based on your LES boxes.')
         else:
-            raise ValueError (f"Inflow type `inflowType` should be 'TS' or 'LES'. Received {self.inflowType}.")
+            raise ValueError (f"Inflow type `inflowType` should be 'TS', 'LES_VTK', or 'LES_AMReX'. Received {self.inflowType}.")
             
         # Check the wake model (1:Polar; 2:Curl; 3:Cartesian)
         if self.mod_wake not in [1,2,3]:
@@ -2647,7 +2670,7 @@ class FFCaseCreation:
                 # Turbine location in TurbSim reference frame
                 xWT = alignedTurbs['Tx'].values + self.xoffset_turbsOrigin2TSOrigin
                 yWT = alignedTurbs['Ty'].values + self.yoffset_turbsOrigin2TSOrigin
-            elif self.inflowStr == 'LES':
+            elif self.inflowStr in ['LES_VTK', 'LES_AMReX']:
                 # Turbine location in LES reference frame
                 xWT = alignedTurbs['Tx'].values
                 yWT = alignedTurbs['Ty'].values
@@ -2662,7 +2685,7 @@ class FFCaseCreation:
         self.planes_yz = planes_yz[0:9]
         self.planes_xz = planes_xz[0:9]      
         
-        if self.inflowStr == 'LES':
+        if self.inflowStr in ['LES_VTK', 'LES_AMReX']:
             self._FF_setup_LES(**kwargs)
 
         elif self.inflowStr == 'TurbSim':
@@ -2699,38 +2722,37 @@ class FFCaseCreation:
             for seed in range(self.nSeeds):
                 currpath = self.getCondSeedPath(cond, seed)
                 if os.path.isdir(currpath):  shutil.rmtree(currpath)
-    
             for case in range(self.nCases):
                 for seed in range(seedsToKeep,self.nSeeds):
                     currpath = self.getCaseSeedPath(cond, case, seed)
                     if os.path.isdir(currpath):  shutil.rmtree(currpath)
                         
         
-       # Create symlinks for the processed-and-renamed vtk files
-        LESboxesDirName = 'LESboxes'
-        
-        for cond in range(self.nConditions):
-            for case in range(self.nCases):
-                for seed in range(self.seedsToKeep):
-                    # Remove TurbSim dir
-                    currpath = self.getHRTurbSimPath(cond, case, seed)
-                    if os.path.isdir(currpath):  shutil.rmtree(currpath)
-                    # Create LES boxes dir
-                    seedPath = self.getCaseSeedPath(cond, case, seed)
-                    currpath = os.path.join(seedPath, LESboxesDirName)
-                    if not os.path.isdir(currpath):  os.makedirs(currpath)
-        
-                    # Low-res box
-                    src = os.path.join(self.inflowPath[cond], 'Low')
-                    dst = os.path.join(seedPath, LESboxesDirName, 'Low')
-                    self._symlink(src, dst)
-        
-                    # High-res boxes
-                    for t in range(self.nTurbines):
-                        src = os.path.join(self.inflowPath[cond], f"HighT{t+1}_inflow{str(self.allCases.sel(case=case).inflow_deg.values).replace('-','m')}deg")
-                        dst = os.path.join(seedPath, LESboxesDirName, f'HighT{t+1}')
+        if self.inflowStr == 'LES_VTK':
+            # Create symlinks for the processed-and-renamed vtk files
+            LESboxesDirName = 'LESboxes'
+            for cond in range(self.nConditions):
+                for case in range(self.nCases):
+                    for seed in range(self.seedsToKeep):
+                        # Remove TurbSim dir
+                        currpath = self.getHRTurbSimPath(cond, case, seed)
+                        if os.path.isdir(currpath):  shutil.rmtree(currpath)
+                        # Create LES boxes dir
+                        seedPath = self.getCaseSeedPath(cond, case, seed)
+                        currpath = os.path.join(seedPath, LESboxesDirName)
+                        if not os.path.isdir(currpath):  os.makedirs(currpath)
+            
+                        # Low-res box
+                        src = os.path.join(self.inflowPath[cond], 'Low')
+                        dst = os.path.join(seedPath, LESboxesDirName, 'Low')
                         self._symlink(src, dst)
-        
+            
+                        # High-res boxes
+                        for t in range(self.nTurbines):
+                            src = os.path.join(self.inflowPath[cond], f"HighT{t+1}_inflow{str(self.allCases.sel(case=case).inflow_deg.values).replace('-','m')}deg")
+                            dst = os.path.join(seedPath, LESboxesDirName, f'HighT{t+1}')
+                            self._symlink(src, dst)
+            
         
         # Loops on all conditions/cases and cases for FAST.Farm
         for cond in range(self.nConditions):
@@ -2759,15 +2781,24 @@ class FFCaseCreation:
         
                     # Open output file and change additional values manually or make sure we have the correct ones
                     ff_file['InflowFile']  = f'"unused"' 
-                    ff_file['Mod_AmbWind'] = self.Mod_AmbWind  # LES 
+                    ff_file['Mod_AmbWind'] = self.Mod_AmbWind  # LES_VTK (1) or LES_AMReX (4)
                     ff_file['TMax'] = self.tmax
         
                     # LES-related parameters
-                    ff_file['DT_Low-VTK']   = self.dt_low
-                    ff_file['DT_High-VTK']  = self.dt_high
-                    ff_file['WindFilePath'] = f'''"{os.path.join(seedPath, LESboxesDirName)}"'''
-                    #if checkWindFiles:
-                    #    ff_file['ChkWndFiles'] = 'TRUE'
+                    if self.inflowStr == 'LES_VTK':
+                        ff_file['DT_Low-VTK']   = self.dt_low
+                        ff_file['DT_High-VTK']  = self.dt_high
+                        ff_file['WindFilePath'] = f'''"{os.path.join(seedPath, LESboxesDirName)}"'''
+                        #if checkWindFiles:
+                        #    ff_file['ChkWndFiles'] = 'TRUE'
+                    elif self.inflowStr == 'LES_AMReX':
+                        ff_file['DT_Low-AMReX']   = self.dt_low
+                        ff_file['DT_High-AMReX']  = self.dt_high
+                        ff_file['WindDirPrefix'] = f'''"{os.path.join(self.inflowPath[cond], 'ffboxes')}"'''
+                        ff_file['DirStartIndex'] = 0 # TODO
+                        WARN('For LES_AMReX, make sure to set the correct DirStartIndex and that the files are named accordingly.')
+
+
         
                     # Super controller
                     if 'UseSC' in ff_file.keys():
@@ -2789,7 +2820,8 @@ class FFCaseCreation:
                         self.dr = round(self.D/15)
                     ff_file['dr'] = self.dr
                     ff_file['NumRadii']  = int(np.ceil(3*D_/(2*self.dr) + 1))
-                    ff_file['NumPlanes'] = int(np.ceil( 20*D_/(self.dt_low*Vhub_*(1-1/6)) ) )
+                    if 'NumPlanes' in ff_file.keys():
+                        ff_file['NumPlanes'] = int(np.ceil( 20*D_/(self.dt_low*Vhub_*(1-1/6)) ) )
 
                     ff_file['OutRadii'] = [ff_file['OutRadii']] if isinstance(ff_file['OutRadii'],(float,int)) else ff_file['OutRadii'] 
                     # If NOutRadii is 0 we find some default radii
@@ -2909,7 +2941,6 @@ class FFCaseCreation:
                     ff_file['dr'] = self.dr
                     ff_file['NumRadii']  = int(np.ceil(3*D_/(2*self.dr) + 1))
                     ff_file['NumPlanes'] = int(np.ceil( 20*D_/(self.dt_low*Vhub_*(1-1/6)) ) )
-        
                     ff_file['OutRadii'] = [ff_file['OutRadii']] if isinstance(ff_file['OutRadii'],(float,int)) else ff_file['OutRadii'] 
                     # If NOutRadii is 0 we find some default radii
                     if ff_file['NOutRadii']==0:
@@ -2922,6 +2953,11 @@ class FFCaseCreation:
                             ff_file['NOutRadii'] = i
                             ff_file['OutRadii'] = ff_file['OutRadii'][:i]
                             break
+                    
+                    # WAT
+                    if 'WAT_ScaleBox' in ff_file.keys():
+                        # Ensure new default is always enabled
+                        ff_file['WAT_ScaleBox'] = True
 
                     # Vizualization outputs
                     ff_file['WrDisWind'] = 'False'
@@ -3020,7 +3056,7 @@ class FFCaseCreation:
         if self.inflowType == 'TS':
             X0_High    = X0_desired
             Y0_High    = Y0_desired
-        elif self.inflowType == 'LES':
+        elif self.inflowType in ['LES_VTK', 'LES_AMReX']:
             X0_High    = X0_Low + np.floor((X0_desired-X0_Low)/dX_High)*dX_High
             Y0_High    = Y0_Low + np.floor((Y0_desired-Y0_Low)/dY_High)*dY_High
     
@@ -3071,7 +3107,7 @@ class FFCaseCreation:
     
     
         # --- Sanity check: check that the high res is at "almost" an integer location
-        if self.inflowType == 'LES':
+        if self.inflowType in ['LES_VTK', 'LES_AMReX']:
             X_rel = (np.array(d['X0_High'])-d['X0_Low'])/d['dX_High']
             Y_rel = (np.array(d['Y0_High'])-d['Y0_Low'])/d['dY_High']
             dX = X_rel - np.round(X_rel) # Should be close to zero
