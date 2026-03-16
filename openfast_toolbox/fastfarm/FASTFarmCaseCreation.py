@@ -320,6 +320,7 @@ class FFCaseCreation:
         self.hasBD                     = False
         self.multi_HD                  = False
         self.multi_MD                  = False
+        self.hasHydroData              = False
         self.tmax_low       = tmax
         self.condDirList    = []
         self.caseDirList    = []
@@ -724,7 +725,7 @@ class FFCaseCreation:
         if self.nTurbines != np.shape(self.ADmodel)[1]:
             raise ValueError(f'The number of turbines in wts ({len(self.wts)}) should match the number of turbines '\
                              f'in the ADmodel and EDmodel arrays ({np.shape(self.ADmodel)[1]})')
-  
+
         # Check on seed parameters
         if self.nSeeds is None:
             self.nSeeds = 1
@@ -742,9 +743,9 @@ class FFCaseCreation:
             raise ValueError(f'The array seedValues has been passed, but its length does not corraaespond '\
                              f'to the number of seeds requested.')
 
+        # Check inflow type
         if not isinstance(self.inflowType, str):
             raise ValueError(f"Inflow type `inflowType` should be a string. Received {type(self.inflowType)}.")
-
         if self.inflowType.lower() == 'ts':
             self.inflowType = 'TS'
         elif self.inflowType.lower() == 'les':
@@ -996,14 +997,18 @@ class FFCaseCreation:
                 if self.hasHD and writeFiles:
                     if not self.multi_HD:
                         self.HydroDynFile.write(os.path.join(currPath, self.HDfilename))
-                    # Copy HydroDyn Data directory
-                    srcF = self.hydrodatafilepath
-                    dstF = os.path.join(currPath, self.hydroDatapath)
-                    os.makedirs(dstF, exist_ok=True)
-                    for file in os.listdir(srcF):
-                        src = os.path.join(srcF, file)
-                        dst = os.path.join(dstF, file)
-                        shutil.copy2(src, dst)
+                    # Check if potential flow was requested and check if hydrodata path has been give
+                    if self.HydroDynFile['PotMod'] == 0 and self.hasHydroData:
+                        WARN('HydroDyn does not request potential flow (PotMod=0), but HydroData files have been given. Change PotMod to 1 or remove the HydroData files.')
+                    if self.HydroDynFile['PotMod'] == 1 and not self.hasHydroData:
+                        raise FFException('HydroDyn requests potential flow (PotMod=1), but no path for the HydroDyn data files has been given.')
+                    elif self.HydroDynFile['PotMod'] == 2:
+                        WARN('PotMod 2 has been requested in the HydroDyn input file. Not sure what to do with HydroPath.')
+                    if self.hasHydroData:
+                        # Copy HydroDyn Data directory
+                        srcF = self.hydroDatapath
+                        dstF = os.path.join(currPath, os.path.basename(self.hydroDatapath))
+                        shutil.copytree(srcF, dstF, dirs_exist_ok=True)
 
                 # BeamDyn
                 if self.hasBD and writeFiles:
@@ -1722,7 +1727,7 @@ class FFCaseCreation:
                 self.controllerInputfilepath = value
                 checkIfExists(self.controllerInputfilepath)
                 self.controllerInputfilename = os.path.basename(value)
-
+                
             elif key == 'coeffTablefilename':
                 if not value.lower().endswith('.csv'):
                     raise ValueError(f'The performance table file should end in "*.csv"')
@@ -1732,10 +1737,14 @@ class FFCaseCreation:
 
             # --- Directories and files given with full path
             elif key == 'hydroDatapath':
-                self.hydrodatafilepath = value
-                if not os.path.isdir(self.hydrodatafilepath):
+                if os.path.isabs(value):
+                    self.hydroDatapath = value
+                else:
+                    self.hydroDatapath = os.path.abspath(value).replace('\\','/')
+                if not os.path.isdir(self.hydroDatapath):
                     raise ValueError(f'The hydroData directory hydroDatapath should be a directory. Received {value}.')
-                self.hydroDatapath = os.path.basename(value)
+                self.hasHydroData = True
+                
 
             elif key == 'libdisconfilepath':
                 ext = os.path.splitext(value)[1].lower()
@@ -1783,6 +1792,11 @@ class FFCaseCreation:
             raise ValueError("SeaState must be used when HydroDyn is used.")
         if self.hasBD:
             raise ValueError(f'ElastoDyn+BeamDyn for CompElast is currently not supported. Remove BeamDyn.')
+        if self.hasHydroData and not self.hasHD:
+            raise ValueError(f'hydroDatapath is given but HDfilename is not given. Remove hydroDatapath or provide HDfilename.')
+        if self.hasController and not self.hasSrvD:
+            raise ValueError (f'libdiscon has been given but no ServoDyn file is provided. Stopping.')
+
         # Set output FAST.Farm filename for convenience
         self.outputFFfilename = 'FF.fstf'
         
@@ -2808,7 +2822,7 @@ class FFCaseCreation:
                     # Shared mooring system
                     if self.hasMD and not self.multi_MD:
                         ff_file['Mod_SharedMooring'] = 3  # {0: None, 3=MoorDyn}
-                        ff_file['SharedMoorFile'] = f'"{self.MDfilename}'
+                        ff_file['SharedMoorFile'] = f'"{self.MDfilename}"'
 
                     # Wake dynamics
                     ff_file['Mod_Wake'] = self.mod_wake
