@@ -771,8 +771,11 @@ class FFCaseCreation:
             else:
                 self.inflowStr = 'LES_AMReX'
                 self.Mod_AmbWind = 4
-            for p in self.inflowPath:
-                if not os.path.isdir(p):
+            self.les_path_exists = [False]*len(self.inflowPath)
+            for i, p in enumerate(self.inflowPath):
+                if os.path.isdir(p):
+                    self.les_path_exists[i] = True
+                else:
                     WARN(f'The LES path {p} does not exist')
             # LES is requested, so domain limits must be given
             if None in (self.dt_high, self.ds_high, self.dt_low, self.ds_low):
@@ -2630,6 +2633,8 @@ class FFCaseCreation:
         **kwargs:
             seedsToKeep: int
                 For the LES setup. Often 1, but if you want to run multiple times the same thing, pick a different value
+            dir_start_index: int
+                Required for LES_AMReX inflow. Ignored for LES_VTK (warning issued if provided).
         '''
 
         if outlistFF is None:
@@ -2726,10 +2731,108 @@ class FFCaseCreation:
             
         return True
 
+    def _check_les_amrex_start(self):
+        '''
+        Check if the AMReX start index provided by the user exists in the directory structure and
+        add the necessary zero-padding when writing FAST.Farm input files. The expected directory structure for each condition is:
+            inflowPath[cond]/
+                ffboxes_0_000/  (low-res box, index 0)
+                ffboxes_1_000/  (high-res box for turbine 1, index 0)
+                ffboxes_2_000/  (high-res box for turbine 2, index 0)
+                ...
+                ffboxes_n_000/  (high-res box for turbine n, index 0)
+        '''
 
-    def _FF_setup_LES(self, seedsToKeep=1):
+        # Initialization 
+        self.dir_start_index_str_by_cond = ['']*self.nConditions
 
-        self.seedsToKeep = seedsToKeep
+        if not all(self.les_path_exists):
+            WARN(f'No LES path(s) given. Skipping checking of AMReX start index. Setting AMReX start index exactly like '
+                 f'provided: "{self.dir_start_index_requested}".')
+            for cond in range(self.nConditions):
+                self.dir_start_index_str_by_cond[cond] = str(self.dir_start_index_requested)
+            return
+
+        # Normalize user-provided start index to integer (allow zero-padded strings)
+        if isinstance(self.dir_start_index_requested, int):
+            dir_start_index_int = self.dir_start_index_requested
+        elif isinstance(self.dir_start_index_requested, str):
+            # Let's also take a string just in case
+            dir_start_index_str = self.dir_start_index_requested.strip()
+            if dir_start_index_str == '' or not dir_start_index_str.isdigit():
+                raise FFException(f'For inflowType="LES_AMReX", `dir_start_index` must be an integer. '
+                                  f'Provided value: {self.dir_start_index_requested}.')
+            dir_start_index_int = int(dir_start_index_str)
+        else:
+            raise FFException(f'For inflowType="LES_AMReX", `dir_start_index` must be an integer. '
+                              f'Provided type: {type(self.dir_start_index_requested)} with value {self.dir_start_index_requested}.')
+        if dir_start_index_int < 0:
+            raise FFException(f'For inflowType="LES_AMReX", `dir_start_index` must be non-negative. '
+                              f'Provided value: {self.dir_start_index_requested}.')
+        self.dir_start_index_int_requested = dir_start_index_int
+
+        # Check that requested ffboxes index exists for all boxes in all conditions
+        #self.dir_start_index_str_by_cond = ['']*self.nConditions
+        for cond in range(self.nConditions):
+            cond_path = self.inflowPath[cond]
+
+            # Parse  <prefix>_<box>_<time>, getting rid of items that don't have at least two underscores (abl_statistics, etc)
+            alldirs = [d.name for d in os.scandir(cond_path) if d.is_dir()]
+            parts = [i.rsplit('_',2) for i in alldirs]
+            parts = [p for p in parts if len(p) == 3]
+            # We might have more files there, let's check the unique files and see if our wind_dir_prefix is there
+            unique_pptag = list(dict.fromkeys(p[0] for p in parts))
+            if self.wind_dir_prefix not in unique_pptag:
+                raise FFException(f'For inflowType="LES_AMReX", expected directory names in {cond_path} to start ',
+                                  f'with "{self.wind_dir_prefix}_<box>_<index>". Found directories starting with {unique_pptag}.',
+                                  f'Specify wind_dir_prefix in FF_setup, e.g., FF_setup(wind_dir_prefix="{unique_pptag[0]}").')
+
+            # Now let's get only the directories that match our wind_dir_prefix
+            parts = [p for p in parts if p[0] == self.wind_dir_prefix]
+
+            # Get all box and time entries for the desired prefix
+            boxindex = np.unique([p[1] for p in parts])
+            timeindex= [p[2] for p in parts]
+
+            # Let's check we have the expected amount of box indexes
+            unique_boxindex_int = sorted(set(int(b) for b in boxindex))
+            if unique_boxindex_int != np.arange(self.nTurbines + 1).tolist():
+                raise FFException(f'For LES AMReX inflow in {cond_path}, expected contiguous box indices starting at 0 (for low-res) '
+                                  f'all the way to {self.nTurbines} (for the last high-res). Found box indices: {unique_boxindex_int}.')
+
+            # Check that dir_start_index exists in the time indices (comparing as int to preserve leading zeros)
+            matched_timestr = next((t for t in timeindex if int(t) == self.dir_start_index_int_requested), None)
+            if matched_timestr is None:
+                unique_timeindex = sorted(set(int(t) for t in timeindex))
+                raise FFException(f'For LES AMReX inflow in {cond_path}, requested `dir_start_index`={self.dir_start_index_requested} was not found '
+                                  f'among the available time indices. Available time indices: {unique_timeindex}.')
+            self.dir_start_index_str_by_cond[cond] = matched_timestr
+
+            # Now, let's finally check that the requested time actually exists for all boxes (rather than, e.g., just for high-res)
+            starting_boxes = [ os.path.join(cond_path, f'{self.wind_dir_prefix}_{i}_{matched_timestr}') for i in range(self.nTurbines+1) ]
+            if not all(os.path.exists(b) for b in starting_boxes):
+                 raise FFException(f'For LES AMReX inflow in {cond_path}, requested `dir_start_index`={self.dir_start_index_requested} is missing for some boxes. Expected directories: {starting_boxes}.')
+
+            INFO(f'AMReX handling: For condition {self.condDirList[cond]}, found matching directories {self.wind_dir_prefix}_[0-{self.nTurbines}]'
+                 f'_{self.dir_start_index_str_by_cond[cond]} for requested dir_start_index={self.dir_start_index_int_requested}')
+
+
+
+
+    def _FF_setup_LES(self, seedsToKeep=1, wind_dir_prefix='ffboxes', dir_start_index=None):
+
+        self.seedsToKeep     = seedsToKeep
+        self.wind_dir_prefix = wind_dir_prefix
+        self.dir_start_index_requested = dir_start_index
+
+        if self.inflowStr == 'LES_AMReX' and self.dir_start_index_requested is None:
+            FAIL("For inflowType='LES_AMReX', `dir_start_index` must be provided in FF_setup (e.g., FF_setup(dir_start_index=0)).")
+
+        if self.inflowStr == 'LES_VTK' and self.dir_start_index_requested is not None:
+            WARN("`dir_start_index` is ignored for inflowType='LES_VTK'.")
+
+        if self.inflowType == "LES_AMReX":
+            self._check_les_amrex_start()
 
         # Clean unnecessary directories and files created by the general setup
         for cond in range(self.nConditions):
