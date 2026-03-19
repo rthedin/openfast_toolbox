@@ -190,6 +190,7 @@ class FASTInputFile(File):
         try:
             self.data.insert(i, d)
         except:
+            print(f'Failed at {self.filename}')
             import pdb; pdb.set_trace()
 
     def insertKeyVal(self, i, key, value, description='', error=False):
@@ -846,6 +847,7 @@ class FASTInputFileBase(File):
                 try:
                     d['value'], d['tabColumnNames'], d['tabUnits'] = parseFASTNumTable(self.filename,lines[i:i+nTabLines+nHeaders+nOffset],nTabLines,i, nHeaders, tableType=tab_type, nOffset=nOffset, varNumLines=d['tabDimVar'])
                 except:
+                    print(f'Failed at {self.filename}')
                     import pdb; pdb.set_trace()
                 d['descr'] = '' #
                 i += nTabLines+1-nOffset

@@ -72,7 +72,7 @@ def main(test=False):
     zbot = 1        # Bottom of your domain
     mod_wake = 2    # Wake model. 1: Polar, 2: Curled, 3: Cartesian
     # ----------- Inflow parameters
-    inflowType = 'LES'
+    inflowType = 'LES_VTK'
     inflowPath = '/full/path/to/LES/case/.../LESboxes'
 
     # ----------- Desired sweeps
@@ -88,7 +88,7 @@ def main(test=False):
 
     # ----------- Template files
     # --- Option 1
-    templateFSTF = os.path.join(scriptDir, '../../../data/IEA15MW/FF.fstf')
+    templateFSTF = os.path.join(scriptDir, '../../../data/IEA15MW/v4/FF.fstf')
     templateFiles = {'libdisconfilepath' : libdiscon}    
     # --- Option 2    
     #templatePath = '/full/path/where/template/files/are'
