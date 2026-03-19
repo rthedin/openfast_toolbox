@@ -1,6 +1,7 @@
 import pandas as pd
 import os, sys, shutil
 import subprocess
+import warnings
 from contextlib import contextmanager
 import numpy as np
 import xarray as xr
@@ -252,8 +253,10 @@ class FFCaseCreation:
         seedValues: list of int
             Seed value for each seed of requested TurbSim simulations if nSeeds!=6
         inflowType: str
-            Inflow type (LES or TS) This variable will dictate whether it is a TurbSim-driven or LES-driven case
-            Choose 'LES' or 'TS' (no default is set)
+            Inflow type (LES_VTK/LES_AMReX or TS) This variable will dictate whether it is a TurbSim-driven or LES-driven case.
+            LES cases can be given by VTK-based input or AMReX-based input.
+            Choose 'LES_VTK', 'LES_AMReX', or 'TS' (no default is set).
+            Backward compatibility: 'LES' is accepted and mapped to 'LES_VTK' with a deprecation warning.
         inflowPath: str or list of strings
             Full path of the LES data, if driven by LES. If None, the setup will be for TurbSim inflow.
             inflowPath can be a single path, or a list of paths of the same length as the sweep in conditions.
@@ -303,7 +306,7 @@ class FFCaseCreation:
         self.attempt     = 1
         self.skipchecks  = skipchecks
         self.flat        = flat
-        # Set aux variable
+        # Initialize aux variable
         self.templateFilesCreatedBool  = False
         self.TSlowBoxFilesCreatedBool  = False
         self.TShighBoxFilesCreatedBool = False
@@ -317,6 +320,7 @@ class FFCaseCreation:
         self.hasBD                     = False
         self.multi_HD                  = False
         self.multi_MD                  = False
+        self.hasHydroData              = False
         self.tmax_low       = tmax
         self.condDirList    = []
         self.caseDirList    = []
@@ -341,13 +345,11 @@ class FFCaseCreation:
         self._setRotorParameters()
         if self.verbose>0: print(f'Setting rotor parameters... Done.')
                                         
-                                        
         # TODO: Creating Cases and Conditions should have its own function interface so the user can call
         if self.verbose>0: print(f'Creating auxiliary arrays for all conditions and cases...', end='\r')
         self.createAuxArrays()          
         if self.verbose>0: print(f'Creating auxiliary arrays for all conditions and cases... Done.')
                                         
-
         if self.path is not None:
             # TODO this should only be done when user ask for input file creation
             if self.verbose>0: print(f'Creating directory structure and copying files...', end='\r')
@@ -721,7 +723,7 @@ class FFCaseCreation:
         if self.nTurbines != np.shape(self.ADmodel)[1]:
             raise ValueError(f'The number of turbines in wts ({len(self.wts)}) should match the number of turbines '\
                              f'in the ADmodel and EDmodel arrays ({np.shape(self.ADmodel)[1]})')
-  
+
         # Check on seed parameters
         if self.nSeeds is None:
             self.nSeeds = 1
@@ -736,26 +738,51 @@ class FFCaseCreation:
                                7693202, 587924, 890090, 435646, -454899, -785138, -78564, -17944, -99021, 389432]
             self.seedValues = self.seedValues[:self.nSeeds]
         if len(self.seedValues) != self.nSeeds:
-            raise ValueError(f'The array seedValues has been passed, but its length does not correspond '\
+            raise ValueError(f'The array seedValues has been passed, but its length does not corraaespond '\
                              f'to the number of seeds requested.')
+
+        # Check inflow type
+        if not isinstance(self.inflowType, str):
+            raise ValueError(f"Inflow type `inflowType` should be a string. Received {type(self.inflowType)}.")
+        if self.inflowType.lower() == 'ts':
+            self.inflowType = 'TS'
+        elif self.inflowType.lower() == 'les':
+            deprec_msg = "inflowType='LES' is deprecated and will be removed in a future release. Use inflowType='LES_VTK'. Mapping to 'LES_VTK'."
+            if self.verbose > 0:
+                WARN(deprec_msg)
+            warnings.warn(deprec_msg, DeprecationWarning, stacklevel=2)
+            self.inflowType = 'LES_VTK'
+        elif self.inflowType.lower() == 'les_vtk':
+            self.inflowType = 'LES_VTK'
+        elif self.inflowType.lower() == 'les_amrex':
+            self.inflowType = 'LES_AMReX'
   
+        # Format inflowPath
+        if isinstance(self.inflowPath,str): self.inflowPath = [self.inflowPath]*len(self.vhub)        
+
         # Check LES parameters
         if self.inflowType == 'TS':
             self.inflowStr = 'TurbSim'
             self.Mod_AmbWind = 3
-        elif self.inflowType == 'LES':
-            if isinstance(self.inflowPath,str): self.inflowPath = [self.inflowPath]*len(self.vhub)
-            self.inflowStr = 'LES'
-            self.Mod_AmbWind = 1
-            for p in self.inflowPath:
-                if not os.path.isdir(p):
+        elif self.inflowType in ['LES_VTK', 'LES_AMReX']:
+            if self.inflowType == 'LES_VTK':
+                self.inflowStr = 'LES_VTK'
+                self.Mod_AmbWind = 1
+            else:
+                self.inflowStr = 'LES_AMReX'
+                self.Mod_AmbWind = 4
+            self.les_path_exists = [False]*len(self.inflowPath)
+            for i, p in enumerate(self.inflowPath):
+                if os.path.isdir(p):
+                    self.les_path_exists[i] = True
+                else:
                     WARN(f'The LES path {p} does not exist')
             # LES is requested, so domain limits must be given
             if None in (self.dt_high, self.ds_high, self.dt_low, self.ds_low):
                 raise ValueError (f'An LES-driven case was requested, but one or more grid parameters were not given. '\
                                    'Set `dt_high`, `ds_high`, `dt_low`, and `ds_low` based on your LES boxes.')
         else:
-            raise ValueError (f"Inflow type `inflowType` should be 'TS' or 'LES'. Received {self.inflowType}.")
+            raise ValueError (f"Inflow type `inflowType` should be 'TS', 'LES_VTK', or 'LES_AMReX'. Received {self.inflowType}.")
             
         # Check the wake model (1:Polar; 2:Curl; 3:Cartesian)
         if self.mod_wake not in [1,2,3]:
@@ -973,14 +1000,18 @@ class FFCaseCreation:
                 if self.hasHD and writeFiles:
                     if not self.multi_HD:
                         self.HydroDynFile.write(os.path.join(currPath, self.HDfilename))
-                    # Copy HydroDyn Data directory
-                    srcF = self.hydrodatafilepath
-                    dstF = os.path.join(currPath, self.hydroDatapath)
-                    os.makedirs(dstF, exist_ok=True)
-                    for file in os.listdir(srcF):
-                        src = os.path.join(srcF, file)
-                        dst = os.path.join(dstF, file)
-                        shutil.copy2(src, dst)
+                    # Check if potential flow was requested and check if hydrodata path has been give
+                    if self.HydroDynFile['PotMod'] == 0 and self.hasHydroData:
+                        WARN('HydroDyn does not request potential flow (PotMod=0), but HydroData files have been given. Change PotMod to 1 or remove the HydroData files.')
+                    if self.HydroDynFile['PotMod'] == 1 and not self.hasHydroData:
+                        raise FFException('HydroDyn requests potential flow (PotMod=1), but no path for the HydroDyn data files has been given.')
+                    elif self.HydroDynFile['PotMod'] == 2:
+                        WARN('PotMod 2 has been requested in the HydroDyn input file. Not sure what to do with HydroPath.')
+                    if self.hasHydroData:
+                        # Copy HydroDyn Data directory
+                        srcF = self.hydroDatapath
+                        dstF = os.path.join(currPath, os.path.basename(self.hydroDatapath))
+                        shutil.copytree(srcF, dstF, dirs_exist_ok=True)
 
                 # BeamDyn
                 if self.hasBD and writeFiles:
@@ -1699,7 +1730,7 @@ class FFCaseCreation:
                 self.controllerInputfilepath = value
                 checkIfExists(self.controllerInputfilepath)
                 self.controllerInputfilename = os.path.basename(value)
-
+                
             elif key == 'coeffTablefilename':
                 if not value.lower().endswith('.csv'):
                     raise ValueError(f'The performance table file should end in "*.csv"')
@@ -1709,10 +1740,14 @@ class FFCaseCreation:
 
             # --- Directories and files given with full path
             elif key == 'hydroDatapath':
-                self.hydrodatafilepath = value
-                if not os.path.isdir(self.hydrodatafilepath):
+                if os.path.isabs(value):
+                    self.hydroDatapath = value
+                else:
+                    self.hydroDatapath = os.path.abspath(value).replace('\\','/')
+                if not os.path.isdir(self.hydroDatapath):
                     raise ValueError(f'The hydroData directory hydroDatapath should be a directory. Received {value}.')
-                self.hydroDatapath = os.path.basename(value)
+                self.hasHydroData = True
+                
 
             elif key == 'libdisconfilepath':
                 ext = os.path.splitext(value)[1].lower()
@@ -1760,6 +1795,11 @@ class FFCaseCreation:
             raise ValueError("SeaState must be used when HydroDyn is used.")
         if self.hasBD:
             raise ValueError(f'ElastoDyn+BeamDyn for CompElast is currently not supported. Remove BeamDyn.')
+        if self.hasHydroData and not self.hasHD:
+            raise ValueError(f'hydroDatapath is given but HDfilename is not given. Remove hydroDatapath or provide HDfilename.')
+        if self.hasController and not self.hasSrvD:
+            raise ValueError (f'libdiscon has been given but no ServoDyn file is provided. Stopping.')
+
         # Set output FAST.Farm filename for convenience
         self.outputFFfilename = 'FF.fstf'
         
@@ -2011,7 +2051,7 @@ class FFCaseCreation:
 
 
         elif _isclose(self.D, 178): # DTU 10MW W turbine
-            print(f'CHANGE THE _setRotorParameters of the DTU 10MW turbine')
+            WARN(f'CHANGE THE _setRotorParameters of the DTU 10MW turbine')
             self.bins = xr.Dataset({'WaveHs':      (['wspd'], [ 1.429, 1.429]), # 1.429 comes from Matt's hydrodyn input file
                                     'WaveTp':      (['wspd'], [ 7.073, 7.073]), # 7.073 comes from Matt's hydrodyn input file
                                     'RotSpeed':    (['wspd'], [ 4.0, 4.0]),     # 4 rpm comes from Matt's ED input file
@@ -2022,7 +2062,7 @@ class FFCaseCreation:
 
 
         elif _isclose(self.D, 82): # Vestas V82, 1.5MW, 82 m diameter
-            print(f'CHANGE THE _setRotorParameters of the V82 1.5MW turbine')
+            WARN(f'CHANGE THE _setRotorParameters of the V82 1.5MW turbine')
             self.bins = xr.Dataset({'WaveHs':      (['wspd'], [ 1.429, 1.429]), # 1.429 comes from Matt's hydrodyn input file
                                     'WaveTp':      (['wspd'], [ 7.073, 7.073]), # 7.073 comes from Matt's hydrodyn input file
                                     'RotSpeed':    (['wspd'], [ 4.0, 4.0]),     # 4 rpm comes from Matt's ED input file
@@ -2046,7 +2086,9 @@ class FFCaseCreation:
 
 
     def TS_low_setup(self, writeFiles=True, runOnce=False):
-        INFO('Preparing TurbSim low resolution input files.')
+        if self.inflowType == 'TS':
+            # This function is called once for domain limits even when LES, so only printing the info when relevant
+            INFO('Preparing TurbSim low resolution input files.')
 
         boxType='lowres'
         lowFilesName = []
@@ -2262,11 +2304,10 @@ class FFCaseCreation:
 
 
     def getDomainParameters(self):
-        INFO('Computing low and high res extent according to TurbSim capabilities')
+        INFO('Computing low- and high-res extents')
 
         # If the low box setup hasn't been called (e.g. LES run), do it once to get domain extents
         if not self.TSlowBoxFilesCreatedBool:
-            if self.verbose>1: print('    Running a TurbSim setup once to get domain extents')
             self.TS_low_setup(writeFiles=False, runOnce=True)
 
         # Figure out how many (and which) high boxes actually need to be executed. Remember that SED/ADsk models
@@ -2593,6 +2634,8 @@ class FFCaseCreation:
         **kwargs:
             seedsToKeep: int
                 For the LES setup. Often 1, but if you want to run multiple times the same thing, pick a different value
+            dir_start_index: int
+                Required for LES_AMReX inflow. Ignored for LES_VTK (warning issued if provided).
         '''
 
         if outlistFF is None:
@@ -2647,7 +2690,7 @@ class FFCaseCreation:
                 # Turbine location in TurbSim reference frame
                 xWT = alignedTurbs['Tx'].values + self.xoffset_turbsOrigin2TSOrigin
                 yWT = alignedTurbs['Ty'].values + self.yoffset_turbsOrigin2TSOrigin
-            elif self.inflowStr == 'LES':
+            elif self.inflowStr in ['LES_VTK', 'LES_AMReX']:
                 # Turbine location in LES reference frame
                 xWT = alignedTurbs['Tx'].values
                 yWT = alignedTurbs['Ty'].values
@@ -2662,7 +2705,7 @@ class FFCaseCreation:
         self.planes_yz = planes_yz[0:9]
         self.planes_xz = planes_xz[0:9]      
         
-        if self.inflowStr == 'LES':
+        if self.inflowStr in ['LES_VTK', 'LES_AMReX']:
             self._FF_setup_LES(**kwargs)
 
         elif self.inflowStr == 'TurbSim':
@@ -2689,48 +2732,151 @@ class FFCaseCreation:
             
         return True
 
+    def _check_les_amrex_start(self):
+        '''
+        Check if the AMReX start index provided by the user exists in the directory structure and
+        add the necessary zero-padding when writing FAST.Farm input files. The expected directory structure for each condition is:
+            inflowPath[cond]/
+                ffboxes_0_000/  (low-res box, index 0)
+                ffboxes_1_000/  (high-res box for turbine 1, index 0)
+                ffboxes_2_000/  (high-res box for turbine 2, index 0)
+                ...
+                ffboxes_n_000/  (high-res box for turbine n, index 0)
+        '''
 
-    def _FF_setup_LES(self, seedsToKeep=1):
+        # Initialization 
+        self.dir_start_index_str_by_cond = ['']*self.nConditions
 
-        self.seedsToKeep = seedsToKeep
+        if not all(self.les_path_exists):
+            WARN(f'No LES path(s) given. Skipping checking of AMReX start index. Setting AMReX start index exactly like '
+                 f'provided: "{self.dir_start_index_requested}".')
+            for cond in range(self.nConditions):
+                self.dir_start_index_str_by_cond[cond] = str(self.dir_start_index_requested)
+            return
+
+        # Normalize user-provided start index to integer (allow zero-padded strings)
+        if isinstance(self.dir_start_index_requested, int):
+            dir_start_index_int = self.dir_start_index_requested
+        elif isinstance(self.dir_start_index_requested, str):
+            # Let's also take a string just in case
+            dir_start_index_str = self.dir_start_index_requested.strip()
+            if dir_start_index_str == '' or not dir_start_index_str.isdigit():
+                raise FFException(f'For inflowType="LES_AMReX", `dir_start_index` must be an integer. '
+                                  f'Provided value: {self.dir_start_index_requested}.')
+            dir_start_index_int = int(dir_start_index_str)
+        else:
+            raise FFException(f'For inflowType="LES_AMReX", `dir_start_index` must be an integer. '
+                              f'Provided type: {type(self.dir_start_index_requested)} with value {self.dir_start_index_requested}.')
+        if dir_start_index_int < 0:
+            raise FFException(f'For inflowType="LES_AMReX", `dir_start_index` must be non-negative. '
+                              f'Provided value: {self.dir_start_index_requested}.')
+        self.dir_start_index_int_requested = dir_start_index_int
+
+        # Check that requested ffboxes index exists for all boxes in all conditions
+        #self.dir_start_index_str_by_cond = ['']*self.nConditions
+        for cond in range(self.nConditions):
+            cond_path = self.inflowPath[cond]
+
+            # Parse  <prefix>_<box>_<time>, getting rid of items that don't have at least two underscores (abl_statistics, etc)
+            alldirs = [d.name for d in os.scandir(cond_path) if d.is_dir()]
+            parts = [i.rsplit('_',2) for i in alldirs]
+            parts = [p for p in parts if len(p) == 3]
+            # We might have more files there, let's check the unique files and see if our wind_dir_prefix is there
+            unique_pptag = list(dict.fromkeys(p[0] for p in parts))
+            if self.wind_dir_prefix not in unique_pptag:
+                raise FFException(f'For inflowType="LES_AMReX", expected directory names in {cond_path} to start ',
+                                  f'with "{self.wind_dir_prefix}_<box>_<index>". Found directories starting with {unique_pptag}.',
+                                  f'Specify wind_dir_prefix in FF_setup, e.g., FF_setup(wind_dir_prefix="{unique_pptag[0]}").')
+
+            # Now let's get only the directories that match our wind_dir_prefix
+            parts = [p for p in parts if p[0] == self.wind_dir_prefix]
+
+            # Get all box and time entries for the desired prefix
+            boxindex = np.unique([p[1] for p in parts])
+            timeindex= [p[2] for p in parts]
+
+            # Let's check we have the expected amount of box indexes
+            unique_boxindex_int = sorted(set(int(b) for b in boxindex))
+            if unique_boxindex_int != np.arange(self.nTurbines + 1).tolist():
+                raise FFException(f'For LES AMReX inflow in {cond_path}, expected contiguous box indices starting at 0 (for low-res) '
+                                  f'all the way to {self.nTurbines} (for the last high-res). Found box indices: {unique_boxindex_int}.')
+
+            # Check that dir_start_index exists in the time indices (comparing as int to preserve leading zeros)
+            matched_timestr = next((t for t in timeindex if int(t) == self.dir_start_index_int_requested), None)
+            if matched_timestr is None:
+                unique_timeindex = sorted(set(int(t) for t in timeindex))
+                raise FFException(f'For LES AMReX inflow in {cond_path}, requested `dir_start_index`={self.dir_start_index_requested} was not found '
+                                  f'among the available time indices. Available time indices: {unique_timeindex}.')
+            self.dir_start_index_str_by_cond[cond] = matched_timestr
+
+            # Now, let's finally check that the requested time actually exists for all boxes (rather than, e.g., just for high-res)
+            starting_boxes = [ os.path.join(cond_path, f'{self.wind_dir_prefix}_{i}_{matched_timestr}') for i in range(self.nTurbines+1) ]
+            if not all(os.path.exists(b) for b in starting_boxes):
+                 raise FFException(f'For LES AMReX inflow in {cond_path}, requested `dir_start_index`={self.dir_start_index_requested} is missing for some boxes. Expected directories: {starting_boxes}.')
+
+            INFO(f'AMReX handling: For condition {self.condDirList[cond]}, found matching directories {self.wind_dir_prefix}_[0-{self.nTurbines}]'
+                 f'_{self.dir_start_index_str_by_cond[cond]} for requested dir_start_index={self.dir_start_index_int_requested}')
+
+
+
+
+    def _FF_setup_LES(self, seedsToKeep=1, wind_dir_prefix='ffboxes', dir_start_index=None):
+
+        self.seedsToKeep     = seedsToKeep
+        self.wind_dir_prefix = wind_dir_prefix
+        self.dir_start_index_requested = dir_start_index
+
+        if self.inflowStr == 'LES_AMReX' and self.dir_start_index_requested is None:
+            FAIL("For inflowType='LES_AMReX', `dir_start_index` must be provided in FF_setup (e.g., FF_setup(dir_start_index=0)).")
+
+        if self.inflowStr == 'LES_VTK' and self.dir_start_index_requested is not None:
+            WARN("`dir_start_index` is ignored for inflowType='LES_VTK'.")
+
+        if self.inflowType == "LES_AMReX":
+            self._check_les_amrex_start()
 
         # Clean unnecessary directories and files created by the general setup
         for cond in range(self.nConditions):
             for seed in range(self.nSeeds):
+                # Delete all cond/seed
                 currpath = self.getCondSeedPath(cond, seed)
-                if os.path.isdir(currpath):  shutil.rmtree(currpath)
-    
+                if os.path.isdir(currpath): shutil.rmtree(currpath)
             for case in range(self.nCases):
                 for seed in range(seedsToKeep,self.nSeeds):
+                    # Delete all-but-seedsToKeep cond/case/seed
                     currpath = self.getCaseSeedPath(cond, case, seed)
-                    if os.path.isdir(currpath):  shutil.rmtree(currpath)
+                    if os.path.isdir(currpath): shutil.rmtree(currpath)
+                for seed in range(seedsToKeep-1,self.nSeeds):
+                    # Delete all cond/case/seed/TurbSim
+                    currpath = self.getHRTurbSimPath(cond, case, seed)
+                    if os.path.isdir(currpath): shutil.rmtree(currpath)
                         
         
-       # Create symlinks for the processed-and-renamed vtk files
-        LESboxesDirName = 'LESboxes'
-        
-        for cond in range(self.nConditions):
-            for case in range(self.nCases):
-                for seed in range(self.seedsToKeep):
-                    # Remove TurbSim dir
-                    currpath = self.getHRTurbSimPath(cond, case, seed)
-                    if os.path.isdir(currpath):  shutil.rmtree(currpath)
-                    # Create LES boxes dir
-                    seedPath = self.getCaseSeedPath(cond, case, seed)
-                    currpath = os.path.join(seedPath, LESboxesDirName)
-                    if not os.path.isdir(currpath):  os.makedirs(currpath)
-        
-                    # Low-res box
-                    src = os.path.join(self.inflowPath[cond], 'Low')
-                    dst = os.path.join(seedPath, LESboxesDirName, 'Low')
-                    self._symlink(src, dst)
-        
-                    # High-res boxes
-                    for t in range(self.nTurbines):
-                        src = os.path.join(self.inflowPath[cond], f"HighT{t+1}_inflow{str(self.allCases.sel(case=case).inflow_deg.values).replace('-','m')}deg")
-                        dst = os.path.join(seedPath, LESboxesDirName, f'HighT{t+1}')
+        if self.inflowStr == 'LES_VTK':
+            # Create symlinks for the processed-and-renamed vtk files; okay if LES path does not exist
+            LESboxesDirName = 'LESboxes'
+            for cond in range(self.nConditions):
+                for case in range(self.nCases):
+                    for seed in range(self.seedsToKeep):
+                        # Remove TurbSim dir
+                        currpath = self.getHRTurbSimPath(cond, case, seed)
+                        if os.path.isdir(currpath):  shutil.rmtree(currpath)
+                        # Create LES boxes dir
+                        seedPath = self.getCaseSeedPath(cond, case, seed)
+                        currpath = os.path.join(seedPath, LESboxesDirName)
+                        if not os.path.isdir(currpath):  os.makedirs(currpath)
+            
+                        # Low-res box
+                        src = os.path.join(self.inflowPath[cond], 'Low')
+                        dst = os.path.join(seedPath, LESboxesDirName, 'Low')
                         self._symlink(src, dst)
-        
+            
+                        # High-res boxes
+                        for t in range(self.nTurbines):
+                            src = os.path.join(self.inflowPath[cond], f"HighT{t+1}_inflow{str(self.allCases.sel(case=case).inflow_deg.values).replace('-','m')}deg")
+                            dst = os.path.join(seedPath, LESboxesDirName, f'HighT{t+1}')
+                            self._symlink(src, dst)
+            
         
         # Loops on all conditions/cases and cases for FAST.Farm
         for cond in range(self.nConditions):
@@ -2759,16 +2905,22 @@ class FFCaseCreation:
         
                     # Open output file and change additional values manually or make sure we have the correct ones
                     ff_file['InflowFile']  = f'"unused"' 
-                    ff_file['Mod_AmbWind'] = self.Mod_AmbWind  # LES 
+                    ff_file['Mod_AmbWind'] = self.Mod_AmbWind  # LES_VTK (1) or LES_AMReX (4)
                     ff_file['TMax'] = self.tmax
         
                     # LES-related parameters
-                    ff_file['DT_Low-VTK']   = self.dt_low
-                    ff_file['DT_High-VTK']  = self.dt_high
-                    ff_file['WindFilePath'] = f'''"{os.path.join(seedPath, LESboxesDirName)}"'''
-                    #if checkWindFiles:
-                    #    ff_file['ChkWndFiles'] = 'TRUE'
-        
+                    if self.inflowStr == 'LES_VTK':
+                        ff_file['DT_Low-VTK']   = self.dt_low
+                        ff_file['DT_High-VTK']  = self.dt_high
+                        ff_file['WindFilePath'] = f'''"{os.path.join(seedPath, LESboxesDirName)}"'''
+                        #if checkWindFiles:
+                        #    ff_file['ChkWndFiles'] = 'TRUE'
+                    elif self.inflowStr == 'LES_AMReX':
+                        ff_file['DT_Low-AMReX']   = self.dt_low
+                        ff_file['DT_High-AMReX']  = self.dt_high
+                        ff_file['WindDirPrefix'] = f'''"{os.path.join(self.inflowPath[cond], self.wind_dir_prefix)}"'''
+                        ff_file['DirStartIndex'] = f'"{self.dir_start_index_str_by_cond[cond]}"'
+
                     # Super controller
                     if 'UseSC' in ff_file.keys():
                         ff_file['UseSC'] = False
@@ -2777,7 +2929,7 @@ class FFCaseCreation:
                     # Shared mooring system
                     if self.hasMD and not self.multi_MD:
                         ff_file['Mod_SharedMooring'] = 3  # {0: None, 3=MoorDyn}
-                        ff_file['SharedMoorFile'] = f'"{self.MDfilename}'
+                        ff_file['SharedMoorFile'] = f'"{self.MDfilename}"'
 
                     # Wake dynamics
                     ff_file['Mod_Wake'] = self.mod_wake
@@ -2789,7 +2941,8 @@ class FFCaseCreation:
                         self.dr = round(self.D/15)
                     ff_file['dr'] = self.dr
                     ff_file['NumRadii']  = int(np.ceil(3*D_/(2*self.dr) + 1))
-                    ff_file['NumPlanes'] = int(np.ceil( 20*D_/(self.dt_low*Vhub_*(1-1/6)) ) )
+                    if 'NumPlanes' in ff_file.keys():
+                        ff_file['NumPlanes'] = int(np.ceil( 20*D_/(self.dt_low*Vhub_*(1-1/6)) ) )
 
                     ff_file['OutRadii'] = [ff_file['OutRadii']] if isinstance(ff_file['OutRadii'],(float,int)) else ff_file['OutRadii'] 
                     # If NOutRadii is 0 we find some default radii
@@ -2805,7 +2958,7 @@ class FFCaseCreation:
 
                     # Vizualization outputs
                     ff_file['WrDisWind'] = 'False'
-                    ff_file['WrDisDT']   = ff_file['DT_Low-VTK']    # default is the same as DT_Low-VTK
+                    ff_file['WrDisDT']   = self.dt_low    # default is the same as DT_Low-VTK
                     ff_file['NOutDisWindXY'] = len(self.planes_xy)
                     ff_file['OutDisWindZ']   = ', '.join(map(str, self.planes_xy))
                     ff_file['NOutDisWindYZ'] = len(self.planes_yz)
@@ -2909,7 +3062,6 @@ class FFCaseCreation:
                     ff_file['dr'] = self.dr
                     ff_file['NumRadii']  = int(np.ceil(3*D_/(2*self.dr) + 1))
                     ff_file['NumPlanes'] = int(np.ceil( 20*D_/(self.dt_low*Vhub_*(1-1/6)) ) )
-        
                     ff_file['OutRadii'] = [ff_file['OutRadii']] if isinstance(ff_file['OutRadii'],(float,int)) else ff_file['OutRadii'] 
                     # If NOutRadii is 0 we find some default radii
                     if ff_file['NOutRadii']==0:
@@ -2922,6 +3074,11 @@ class FFCaseCreation:
                             ff_file['NOutRadii'] = i
                             ff_file['OutRadii'] = ff_file['OutRadii'][:i]
                             break
+                    
+                    # WAT
+                    if 'WAT_ScaleBox' in ff_file.keys():
+                        # Ensure new default is always enabled
+                        ff_file['WAT_ScaleBox'] = True
 
                     # Vizualization outputs
                     ff_file['WrDisWind'] = 'False'
@@ -3020,7 +3177,7 @@ class FFCaseCreation:
         if self.inflowType == 'TS':
             X0_High    = X0_desired
             Y0_High    = Y0_desired
-        elif self.inflowType == 'LES':
+        elif self.inflowType in ['LES_VTK', 'LES_AMReX']:
             X0_High    = X0_Low + np.floor((X0_desired-X0_Low)/dX_High)*dX_High
             Y0_High    = Y0_Low + np.floor((Y0_desired-Y0_Low)/dY_High)*dY_High
     
@@ -3071,7 +3228,7 @@ class FFCaseCreation:
     
     
         # --- Sanity check: check that the high res is at "almost" an integer location
-        if self.inflowType == 'LES':
+        if self.inflowType in ['LES_VTK', 'LES_AMReX']:
             X_rel = (np.array(d['X0_High'])-d['X0_Low'])/d['dX_High']
             Y_rel = (np.array(d['Y0_High'])-d['Y0_Low'])/d['dY_High']
             dX = X_rel - np.round(X_rel) # Should be close to zero
