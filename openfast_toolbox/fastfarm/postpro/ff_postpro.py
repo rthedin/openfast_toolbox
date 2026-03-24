@@ -27,7 +27,7 @@ def _getCaseSeedPath(caseobj, cond, case, seed):
         print('>>> get CaseSeedPath failed')
         return os.path.join(caseobj.path, caseobj.condDirList[cond], caseobj.caseDirList[case], f'Seed_{seed}')
 
-def readTurbineOutputPar(caseobj, dt_openfast, dt_processing, saveOutput=True, output='zarr',
+def readTurbineOutputPar(caseobj, dt_openfast, dt_processing, saveOutput=True, output='nc',
                          iCondition=0, fCondition=-1, iCase=0, fCase=-1, iSeed=0, fSeed=-1, iTurbine=0, fTurbine=-1,
                          nCores=36):
     '''
@@ -150,7 +150,7 @@ def readTurbineOutputPar(caseobj, dt_openfast, dt_processing, saveOutput=True, o
 
     return comb_ds
 
-def readTurbineOutput(caseobj, dt_openfast, dt_processing=1, saveOutput=True, output='zarr',
+def readTurbineOutput(caseobj, dt_openfast, dt_processing=1, saveOutput=True, output='nc',
                       iCondition=0, fCondition=-1, iCase=0, fCase=-1, iSeed=0, fSeed=-1, iTurbine=0, fTurbine=-1):
     '''
     caseobj: FASTFarmCaseSetup object
@@ -243,13 +243,13 @@ def readTurbineOutput(caseobj, dt_openfast, dt_processing=1, saveOutput=True, ou
                                                                                                  'seed':[seed],
                                                                                                  'turbine': [t+1]})
                         turbs_t.append(ds_t)
-                    turbs_t = xr.concat(turbs_t,dim='turbine')
+                    turbs_t = xr.concat(turbs_t, dim='turbine', data_vars='all')
                     turbs_seed.append(turbs_t)
-                turbs_seed = xr.concat(turbs_seed,dim='seed')
+                turbs_seed = xr.concat(turbs_seed, dim='seed', data_vars='all')
                 turbs_case.append(turbs_seed)
-            turbs_case = xr.concat(turbs_case,dim='case')
+            turbs_case = xr.concat(turbs_case, dim='case', data_vars='all')
             turbs_cond.append(turbs_case)
-        turbs_cond = xr.concat(turbs_cond, dim='cond')
+        turbs_cond = xr.concat(turbs_cond, dim='cond', data_vars='all')
 
         # Rename variables to get rid of problematic characters ('-','/')
         varlist = list(turbs_cond.keys())
@@ -270,7 +270,7 @@ def readTurbineOutput(caseobj, dt_openfast, dt_processing=1, saveOutput=True, ou
 
 
 
-def readFFPlanesPar(caseobj, sliceToRead, verbose=False, saveOutput=True, iCondition=0, fCondition=-1, iCase=0, fCase=-1, iSeed=0, fSeed=-1, itime=0, ftime=-1, skiptime=1, nCores=36, outputformat='zarr'):
+def readFFPlanesPar(caseobj, sliceToRead, verbose=False, saveOutput=True, iCondition=0, fCondition=-1, iCase=0, fCase=-1, iSeed=0, fSeed=-1, itime=0, ftime=-1, skiptime=1, nCores=36, outputformat='nc'):
 
     if fCondition==-1:
         fCondition = caseobj.nConditions
@@ -307,7 +307,8 @@ def readFFPlanesPar(caseobj, sliceToRead, verbose=False, saveOutput=True, iCondi
             print(f'Total number of condtions requested ({fCondition-iCondition}) is lower than number of cores {nCores}.')
             print(f'Changing the number of cores to {fCondition-iCondition}.')
             nCores = fCondition-iCondition
-    else:
+
+    elif fCondition-iCondition < fCase-iCase:
         loopOn = 'case'
         print(f'Looping on cases.')
         if fCase-iCase < nCores:
@@ -315,11 +316,19 @@ def readFFPlanesPar(caseobj, sliceToRead, verbose=False, saveOutput=True, iCondi
             print(f'Changing the number of cores to {fCase-iCase}.')
             nCores = fCase-iCase
 
+    # Special case of a single cond, single case
+    if fCondition == 1 and fCase == 1:
+        loopOn = 'time'
+        print(f'Single condition, single case. Looping in time.')
+        if ftime-itime < nCores:
+            print(f'Total number of times requested ({ftime-itime}) is lower than number of cores {nCores}.')
+            print(f'Changing the number of cores to {ftime-itime}.')
+            nCores = ftime-itime
+
 
     print(f'Running readFFPlanes in parallel using {nCores} workers')
 
     if loopOn == 'cond':
-
         # Split all the cases in arrays of roughly the same size
         chunks =  np.array_split(range(iCondition,fCondition), nCores)
         # Now, get the beginning and end of each separate chunk
@@ -328,12 +337,13 @@ def readFFPlanesPar(caseobj, sliceToRead, verbose=False, saveOutput=True, iCondi
         print(f'iCond_list is {iCond_list}')
         print(f'fCond_list is {fCond_list}')
 
-        # For generality, we create the list of cases as a repeat
+        # For generality, we create the list of cases and time as a repeat
         iCase_list = repeat(iCase)
         fCase_list = repeat(fCase)
+        itime_list = repeat(itime)
+        ftime_list = repeat(ftime)
 
     elif loopOn == 'case':
-
         # Split all the cases in arrays of roughly the same size
         chunks =  np.array_split(range(iCase,fCase), nCores)
         # Now, get the beginning and end of each separate chunk
@@ -342,12 +352,26 @@ def readFFPlanesPar(caseobj, sliceToRead, verbose=False, saveOutput=True, iCondi
         print(f'iCase_list is {iCase_list}')
         print(f'fCase_list is {fCase_list}')
 
-        # For generality, we create the list of cond as a repeat
+        # For generality, we create the list of cond and time as a repeat
         iCond_list = repeat(iCondition)
         fCond_list = repeat(fCondition)
+        itime_list = repeat(itime)
+        ftime_list = repeat(ftime)
 
-    else:
-        raise ValueError (f"This shouldn't occur. Not sure what went wrong.")
+    elif loopOn == 'time':
+        # Split all the cases in arrays of roughly the same size
+        chunks =  np.array_split(range(itime,ftime,skiptime), nCores)
+        # Now, get the beginning and end of each separate chunk
+        itime_list = [i[0]    for i in chunks]
+        ftime_list = [i[-1]+1 for i in chunks] 
+        print(f'itime_list is {itime_list}')
+        print(f'ftime_list is {ftime_list}')
+
+        # For generality, we create the list of cond and cases as a repeat
+        iCond_list = repeat(iCondition)
+        fCond_list = repeat(fCondition)
+        iCase_list = repeat(iCase)
+        fCase_list = repeat(fCase)
 
 
     p = Pool()
@@ -361,8 +385,8 @@ def readFFPlanesPar(caseobj, sliceToRead, verbose=False, saveOutput=True, iCondi
                                       fCase_list,               # fCase
                                       repeat(iSeed),            # iSeed
                                       repeat(fSeed),            # fSeed
-                                      repeat(itime),            # itime
-                                      repeat(ftime),            # ftime
+                                      itime_list,               # itime
+                                      ftime_list,               # ftime
                                       repeat(skiptime),         # skiptime
                                       repeat(outputformat)      # outputformat
                                      )
@@ -388,7 +412,7 @@ def readFFPlanesPar(caseobj, sliceToRead, verbose=False, saveOutput=True, iCondi
 
 
 
-def readFFPlanes(caseobj, slicesToRead=['x','y','z'], verbose=False, saveOutput=True, iCondition=0, fCondition=-1, iCase=0, fCase=-1, iSeed=0, fSeed=-1, itime=0, ftime=-1, skiptime=1, outformat='zarr'):
+def readFFPlanes(caseobj, slicesToRead=['x','y','z'], verbose=False, saveOutput=True, iCondition=0, fCondition=-1, iCase=0, fCase=-1, iSeed=0, fSeed=-1, itime=0, ftime=-1, skiptime=1, outformat='nc'):
     '''
     Read and process FAST.Farm planes into xarrays.
 
@@ -429,7 +453,7 @@ def readFFPlanes(caseobj, slicesToRead=['x','y','z'], verbose=False, saveOutput=
     if skiptime<1:
         raise ValueError (f'Skiptime should be 1 or greater. If 1, no slices will be skipped.')
 
-    print(f'Requesting to save {slicesToRead} slices')
+    if verbose: print(f'Requesting to save {slicesToRead} slices')
 
     #if nConditions is None:
     #    nConditions = caseobj.nConditions
@@ -503,12 +527,21 @@ def readFFPlanes(caseobj, slicesToRead=['x','y','z'], verbose=False, saveOutput=
                         NOutDisWindXZ = ff_file['NOutDisWindXZ']
                         WrDisDT       = ff_file['WrDisDT']
 
-                        # Determine number of output VTKs
-                        nOutputTimes = int(np.floor(tmax/WrDisDT))
+                        # Determine number of output VTKs based on succesful completion
+                        nOutputTimes_expected = int(np.floor(tmax/WrDisDT))
+                        # Determine number of actually available snapshots from files on disk
+                        disxy001_prefix = f'{_get_fstf_filename(caseobj)}.Low.DisXY001.'
+                        disxy001_files = [f for f in os.listdir( os.path.join(seedPath, 'vtk_ff')) if f.startswith(disxy001_prefix) and f.endswith('.vtk')]
+                        nOutputTimes_available = len(disxy001_files)
+                        if nOutputTimes_available != nOutputTimes_expected:
+                            print(f'WARNING: Expected {nOutputTimes_expected} outputs from TMax/WrDisDT, but found {nOutputTimes_available}'
+                                  f' files matching. Reading only available snapshots.')
+                        nOutputTimes = min(nOutputTimes_expected, nOutputTimes_available)
+                        
 
                         # Determine number of output digits for reading
                         ndigitsplane = max(len(str(max(NOutDisWindXY,NOutDisWindXZ,NOutDisWindYZ))), 3)
-                        ndigitstime = len(str(nOutputTimes)) + 1  # this +1 is experimental. I had 1800 planes and got 5 digits.
+                        ndigitstime = len(str(nOutputTimes_expected)) + 1  # this +1 is experimental. I had 1800 planes and got 5 digits.
                         # If this breaks again and I need to come here to fix, I need to ask Andy how the amount of digits is determined.
 
 
@@ -520,7 +553,7 @@ def readFFPlanes(caseobj, slicesToRead=['x','y','z'], verbose=False, saveOutput=
 
 
                         # Print info
-                        print(f'Processing {slices} slice: Condition {cond}, Case {case}, Seed {seed}, snapshot {itime} to {ftime} ({nOutputTimes} available)')
+                        if verbose: print(f'Processing {slices} slice: Condition {cond}, Case {case}, Seed {seed}, snapshot {itime} to {ftime} ({nOutputTimes} available)')
 
                         if slices == 'z':
                             # Read Low-res z-planes
@@ -536,9 +569,9 @@ def readFFPlanes(caseobj, slicesToRead=['x','y','z'], verbose=False, saveOutput=
                                     ds = readAndCreateDataset(vtk, caseobj, cond=cond, case=case, seed=seed, t=t, WrDisDT=WrDisDT)
 
                                     Slices_t.append(ds)
-                                Slices_t = xr.concat(Slices_t,dim='time')
+                                Slices_t = xr.concat(Slices_t, dim='time', data_vars='all')
                                 Slices.append(Slices_t)
-                            Slices = xr.concat(Slices,dim='z')
+                            Slices = xr.concat(Slices, dim='z', data_vars='all')
 
                         elif slices == 'y':
                             # Read Low-res y-planes
@@ -554,9 +587,9 @@ def readFFPlanes(caseobj, slicesToRead=['x','y','z'], verbose=False, saveOutput=
                                     ds = readAndCreateDataset(vtk, caseobj, cond=cond, case=case, seed=seed, t=t, WrDisDT=WrDisDT)
 
                                     Slices_t.append(ds)
-                                Slices_t = xr.concat(Slices_t,dim='time')
+                                Slices_t = xr.concat(Slices_t, dim='time', data_vars='all')
                                 Slices.append(Slices_t)
-                            Slices = xr.concat(Slices,dim='y')
+                            Slices = xr.concat(Slices, dim='y', data_vars='all')
 
                         elif slices == 'x':
                             # Read Low-res x-planes
@@ -573,20 +606,20 @@ def readFFPlanes(caseobj, slicesToRead=['x','y','z'], verbose=False, saveOutput=
                                     ds = readAndCreateDataset(vtk, caseobj, cond=cond, case=case, seed=seed, t=t, WrDisDT=WrDisDT)
 
                                     Slices_t.append(ds)
-                                Slices_t = xr.concat(Slices_t,dim='time')
+                                Slices_t = xr.concat(Slices_t, dim='time', data_vars='all')
                                 Slices.append(Slices_t)
-                            Slices = xr.concat(Slices,dim='x')
+                            Slices = xr.concat(Slices, dim='x', data_vars='all')
 
                         else:
                             raise ValueError(f'Only slices x, y, z are available. Slice {slices} was requested. Stopping.')
 
                         Slices_seed.append(Slices)
-                    Slices_seed = xr.concat(Slices_seed, dim='seed')
+                    Slices_seed = xr.concat(Slices_seed, dim='seed', data_vars='all')
                     Slices_case.append(Slices_seed)
-                Slices_case = xr.concat(Slices_case, dim='case')
+                Slices_case = xr.concat(Slices_case, dim='case', data_vars='all')
                 Slices_cond.append(Slices_case)
 
-            Slices = xr.concat(Slices_cond, dim='cond')
+            Slices = xr.concat(Slices_cond, dim='cond', data_vars='all')
 
             if saveOutput:
                 print(f'Saving {slices} slice file {outputfile}...')
@@ -597,8 +630,9 @@ def readFFPlanes(caseobj, slicesToRead=['x','y','z'], verbose=False, saveOutput=
 
             if len(slicesToRead) == 1:
                 # Single slice was requested
-                print(f'Since single slice was requested, returning it.')
+                if verbose: print(f'Since single slice was requested, returning it.')
                 return Slices
+            
 
 
 def readAndCreateDataset(vtk, caseobj, cond=None, case=None, seed=None, t=None, WrDisDT=None):
@@ -693,10 +727,20 @@ def readVTK_structuredPoints (vtkpath):
 
 def compute_load_rose(turbs, nSectors=18):
     
-    channel_pairs = [['TwrBsMxt_[kNm]', 'TwrBsMyt_[kNm]'],
-                     ['RootMxc1_[kNm]', 'RootMyc1_[kNm]'],
-                     ['LSSGagMya_[kNm]','LSSGagMza_[kNm]']]
-    channel_out   =  ['TwrBsMt_[kNm]', 'RootMc1_[kNm]', 'LSSGagMa_[kNm]']
+    channel_pairs = []                                                          
+    channel_out   = []
+
+    if 'TwrBsMxt_[kNm]' in turbs and 'TwrBsMyt_[kNm]' in turbs:
+        channel_pairs += [['TwrBsMyt_[kNm]', 'TwrBsMxt_[kNm]']]  # fore-aft, side-to-side
+        channel_out += ['TwrBsMt_[kNm]']
+
+    if 'RootMxc1_[kNm]' in turbs and 'RootMyc1_[kNm]' in turbs:
+        channel_pairs += [['RootMyc1_[kNm]', 'RootMxc1_[kNm]']]  # out-of-plane, in-plane
+        channel_out   += ['RootMc1_[kNm]']
+
+    if 'LSSGagMya_[kNm]' in turbs and 'LSSGagMza_[kNm]' in turbs:
+        channel_pairs += [['LSSGagMya_[kNm]','LSSGagMza_[kNm]']]
+        channel_out   += ['LSSGagMa_[kNm]']
     
     if nSectors%2 != 0:
         print(f'WARNING: it is recommended an even number of sectors')
@@ -713,14 +757,120 @@ def compute_load_rose(turbs, nSectors=18):
         all_load = []
         for i, theta in enumerate(theta_bin[:-1]):
             curr_theta = (theta_bin[i] + theta_bin[i+1])/2
-            curr_load = load_0deg*cosd(curr_theta) + load_90deg*sind(curr_theta)
+            curr_load = load_0deg*np.cos(np.deg2rad(curr_theta)) + load_90deg*np.sin(np.deg2rad(curr_theta))
             all_load.append(curr_load.expand_dims('theta').assign_coords({'theta': [curr_theta]}))
                             
-        all_load = xr.concat(all_load, dim='theta').to_dataset(name=channel_out[p])
+        all_load = xr.concat(all_load, dim='theta', data_vars='all').to_dataset(name=channel_out[p])
         
         turbs = xr.merge([turbs,all_load])
     
     return turbs
+
+
+
+def compute_worst_performing_sector(ds=None, ds_mean=None, ds_std=None, vars=['TwrBsMt_[kNm]','RootMc1_[kNm]','LSSGagMa_[kNm]'], add_as='regvar'):
+    '''
+    From an dataset with sectors indicated by the `theta` variable (that is,
+    output of `compute_load_rose`), get the sector of worst performance and
+    add it as another variable. Takes either the regular ds or a pair of ds,
+    one with mean and other with standard deviation. To find the sector with
+    the worse performance, we look at the mean datasets, then find the same
+    sector on the std ds and do the operations there. It returns the std and
+    mean datasets with an additional variables `<var>_std_of_theta_of_maxmean`
+    and `<var>_maxmean`, respectively.  Additionally, it adds a non-dimension
+    coordinate with `theta_of_max_mean` indicating which sector the maximum
+    mean occurred, which is also the same sector of the worse std. Perform all
+    the operations in place, and returns both the mean and std and datasets.
+
+    Inputs:
+    -------
+    ds: xr.Dataset
+        Dataset output of compute_load_rose. Does not contain the mean nor
+        the standard deviation data-- those will be computed internally.
+        Has coordinate `turbines`.
+    ds_mean: xr.Dataset
+        Dataset output of compute_load_rose, followed by a `mean` operation.
+        Contains the mean data. Has coordinate `turbines`.
+    ds_std: xr.Dataset
+        Dataset output of compute_load_rose, followed by a `std` operation.
+        Contains the standard deviation data. Has coordinate `turbines`.
+    vars: str
+        Variable in which to perform the worst sector, if only a subset is 
+        needed. By default, does in all three available (blade root, tower
+        base, and LSS bending moments).
+    add_as: str
+        Option to add result as either coordinate or regular variable, given
+        by 'coord' or 'regvar'
+
+    Outputs
+    -------
+    ds_mean: xr.Dataseet
+    ds_std: xr.Dataset
+
+    Example call
+    ------------
+    ds_turbs_rose = compute_load_rose(ds_turbs_les)
+    ds_turbs_mean = ds_turbs_les_rose.sel(time=slice(600,None)).mean(dim='time')
+    ds_turbs_std  = ds_turbs_les_rose.sel(time=slice(600,None)).std(dim='time')
+
+    ds_turbs_std = compute_worst_performing_sector(ds_mean=ds_turbs_mean, ds_std=ds_turbs_std)
+
+    '''
+
+    # Check input datasets
+    if ds is None:
+        if ds_mean is None or ds_std is None:
+            raise ValueError(f'Either the regular ds or the pair of std and mean needs to be provided')
+        dsst = ds_std.copy()
+        dsme = ds_mean.copy()
+    else:
+        if ds_mean is not None or ds_std is not None:
+            raise ValueError(f'Either the regular ds or the pair of std and mean needs to be provided')
+        print(f'Only ds provided. Calculating the mean and std from `time` 600 until the end.')
+        dsme = ds.sel(time=slice(600,None)).mean(dim='time').copy()
+        dsst = ds.sel(time=slice(600,None)).std(dim='time').copy()
+             
+    # Check input
+    if add_as not in ('coord', 'regvar'):
+        raise ValueError(f"add_as can only be 'coord' or 'regvar'. See docstring")
+
+    # Make vars iterable even if single string
+    if isinstance(vars,str): vars = [vars]
+        
+    for var in vars:
+        # Skip processing if such variable is not on dataset
+        if var not in dsst:  continue
+
+        print(f'Processing variable {var}')
+        
+        theta_idx_max = dsme[var].argmax(dim='theta') 
+        max_stds      = dsst[var].isel(theta=theta_idx_max)
+        max_mean      = dsme[var].isel(theta=theta_idx_max)
+        theta_max = dsme['theta'].isel(theta=theta_idx_max)
+
+        if add_as == 'coord':
+            # Add the worst std value, related to the theta of worst mean
+            dsst[f'{var}_of_theta_of_maxmean'] = xr.DataArray(
+                             max_stds.data, dims=["turbine"],
+                             coords={ "turbine"         : dsst["turbine"],
+                                      f"{var}_theta_of_maxmean": ("turbine", theta_max.data), },
+                         )
+            # Add the worst mean value, related to the theta of worst mean
+            dsme[f'{var}_of_theta_of_maxmean'] = xr.DataArray(
+                             max_mean.data, dims=["turbine"],
+                             coords={ "turbine"         : dsme["turbine"],
+                                      f"{var}_theta_of_maxmean": ("turbine", theta_max.data), },
+                         )
+        elif add_as == 'regvar':
+            # Add the actual worst std to array, related to the theta of worst mean
+            dsst[f'{var}_of_theta_of_maxmean'] = ('turbine', max_stds.values)
+            # Add the actual worst mean to array, related to the theta of worst mean
+            dsme[f'{var}_of_theta_of_maxmean'] = ('turbine', max_mean.values)
+            # Add the value of theta related to the maximum mean
+            dsst[f'{var}_theta_of_maxmean'] = ('turbine', theta_max.values)
+            dsme[f'{var}_theta_of_maxmean'] = ('turbine', theta_max.values)
+
+    return dsme, dsst
 
 
 

@@ -42,7 +42,7 @@ from itertools import repeat
 import multiprocessing
 from windtools.amrwind.post_processing  import StructuredSampling
 
-def main(samplingboxfile, pppath, pptag, requestedgroup, outpath, dt, t0, itime, ftime, steptime, offsetz, vtkstartind, terrain, ncores):
+def main(samplingboxfile, pppath, pptag, requestedgroup, outpath, dt, t0, itime, ftime, steptime, offsetz, vtkstartind, terrain, use_samplinginfo, ncores):
 
     if ncores is None:
         ncores = multiprocessing.cpu_count()
@@ -62,7 +62,7 @@ def main(samplingboxfile, pppath, pptag, requestedgroup, outpath, dt, t0, itime,
         ftime = s.all_times[-1]
     available_time_indexes = [n for n in s.all_times if itime <= n <= ftime]
 
-    ## Split all the time steps in arrays of roughly the same size
+    # Split all the time steps in arrays of roughly the same size
     chunks =  np.array_split(available_time_indexes, ncores)
 
     # Get rid of the empty chunks (happens when the number of boxes is lower than 96)
@@ -74,19 +74,27 @@ def main(samplingboxfile, pppath, pptag, requestedgroup, outpath, dt, t0, itime,
     print(f'itime_list is {itime_list}')
     print(f'ftime_list is {ftime_list}')
 
+    print(f'size is {len(itime_list)}')
+    if len(itime_list) == 0:
+        raise ValueError(f'The size of the split time arrays for a parallel call of '\
+                         f'to_vtk is zero, thus no boxes were found between the '\
+                         f'requested indexed {itime} and {ftime}. Boxes are available '\
+                         f'from index {available_time_indexes[0]} to {available_time_indexes[-1]}.')
+
     p = multiprocessing.Pool()
-    ds_ = p.starmap(s.to_vtk, zip(repeat(group),          # group
-                                  repeat(outpathgroup),   # outputPath
-                                  repeat(samplingboxfile),# file
-                                  repeat(pptag),          # pptag
-                                  repeat(True),           # verbose
-                                  repeat(offsetz),        # offset in z
-                                  itime_list,             # itime
-                                  ftime_list,             # ftime
-                                  repeat(t0),             # t0
-                                  repeat(dt),             # dt
-                                  repeat(vtkstartind),    # vtkstartind
-                                  repeat(terrain)         # terrain
+    ds_ = p.starmap(s.to_vtk, zip(repeat(group),            # group
+                                  repeat(outpathgroup),     # outputPath
+                                  repeat(samplingboxfile),  # file
+                                  repeat(pptag),            # pptag
+                                  repeat(True),             # verbose
+                                  repeat(offsetz),          # offset in z
+                                  itime_list,               # itime
+                                  ftime_list,               # ftime
+                                  repeat(t0),               # t0
+                                  repeat(dt),               # dt
+                                  repeat(vtkstartind),      # vtkstartind
+                                  repeat(use_samplinginfo), # use_samplinginfo
+                                  repeat(terrain)           # terrain
                                  )
                               )
     print('Finished.')
@@ -120,6 +128,8 @@ if __name__ == '__main__':
                         help="Offset in the x direction, ensuring a point at hub height")
     parser.add_argument("--vtkstartind", "-vtkstartind", default=0,
                         help="Index by which the names of the vtk files will be shifted")
+    parser.add_argument("--use_samplinginfo", '-use_samplinginfo', type=bool, default=False,
+                        help="Whether or not to use the information inside sampling_info.yaml to get the time")
     parser.add_argument("--pptag", "-tag", type=str, default=None,
                         help="Post-processing tag (e.g. 'box_hr')")
     parser.add_argument("--terrain", "-terrain", type=bool, default=False,
@@ -131,19 +141,20 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Parse inputs
-    path        = args.path
-    ncfile      = args.ncfile
-    dt          = args.dt
-    t0          = args.initialtime
-    group       = args.group
-    itime       = args.itime
-    ftime       = args.ftime
-    steptime    = args.steptime
-    offsetz     = args.offsetz
-    vtkstartind = args.vtkstartind
-    pptag       = args.pptag
-    terrain     = args.terrain
-    ncores      = args.ncores
+    path             = args.path
+    ncfile           = args.ncfile
+    dt               = args.dt
+    t0               = args.initialtime
+    group            = args.group
+    itime            = args.itime
+    ftime            = args.ftime
+    steptime         = args.steptime
+    offsetz          = args.offsetz
+    vtkstartind      = args.vtkstartind
+    pptag            = args.pptag
+    terrain          = args.terrain
+    ncores           = args.ncores
+    use_samplinginfo = args.use_samplinginfo
 
     # ------------------------------------------------------------------------------
     # --------------------------- DONE PARSING INPUTS ------------------------------
@@ -226,6 +237,6 @@ if __name__ == '__main__':
 
     print(f'Starting job at {time.ctime()}')
     multiprocessing.freeze_support()
-    main(ncfile, pppath, pptag, group, outpath, dt, t0, itime, ftime, steptime, offsetz, vtkstartind, terrain, ncores)
+    main(ncfile, pppath, pptag, group, outpath, dt, t0, itime, ftime, steptime, offsetz, vtkstartind, terrain, use_samplinginfo, ncores)
     print(f'Ending job at   {time.ctime()}')
 
