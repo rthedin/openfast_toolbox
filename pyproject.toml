@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openfast_toolbox"
+description = "openfast_toolbox"
+readme = "README.md"
+requires-python = ">=3.6"
+dynamic = ["version"]
+classifiers = [
+    "Topic :: Utilities",
+    "Topic :: Software Development :: Testing",
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3.6",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Version Control :: Git",
+]
+
+dependencies = [
+    "matplotlib",
+    "openpyxl",
+    "numpy>=1.15.2",
+    "pandas",
+    "pyarrow",
+    "scipy",
+    "chardet",
+    "xarray",
+    "dill",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/openfast/openfast_toolbox/"
+Repository = "https://github.com/openfast/openfast_toolbox/"
+
+[project.scripts]
+openfast_toolbox = "openfast_toolbox.__main__:main"
+
+[tool.setuptools.dynamic]
+version = {file = "VERSION"}
+
+[tool.setuptools.packages.find]
+include = ["openfast_toolbox*"]
