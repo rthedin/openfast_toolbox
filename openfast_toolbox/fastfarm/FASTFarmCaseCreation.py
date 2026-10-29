@@ -1157,7 +1157,7 @@ class FFCaseCreation:
                             self.ElastoDynFile['BldFile(2)'] = f'"{self.EDbladefilename}"'
                             self.ElastoDynFile['BldFile(3)'] = f'"{self.EDbladefilename}"'
                         self.ElastoDynFile['TwrFile']  = f'"{self.EDtowerfilename}"'
-                        self.ElastoDynFile['Azimuth']  = round(np.random.uniform(low=0, high=360)) # start at a random value
+                        self.ElastoDynFile['Azimuth']  = 0 # round(np.random.uniform(low=0, high=360)) # start at a random value
                         if writeFiles:
                             if t==0: shutilcopy2_untilSuccessful(self.EDbladefilepath, os.path.join(currPath,self.EDbladefilename))
                             if t==0: shutilcopy2_untilSuccessful(self.EDtowerfilepath, os.path.join(currPath,self.EDtowerfilename))
@@ -2112,8 +2112,8 @@ class FFCaseCreation:
         elif _isclose(self.D, 93): # Siemens SWT-2.3-93 2.3 MW, 93 m diameter
             self.bins = xr.Dataset({'WaveHs':      (['wspd'], [ 1, 1]),         # arbitrary since no hydrodyn is used
                                     'WaveTp':      (['wspd'], [ 7, 7]),         # arbitrary since no hydrodyn is used
-                                    'RotSpeed':    (['wspd'], [ 5.0, 5.0]),     # from input file
-                                    'BlPitch':     (['wspd'], [ -1, -1]),       # from input file
+                                    'RotSpeed':    (['wspd'], [ 12.9377, 12.9377]),
+                                    'BlPitch':     (['wspd'], [ 0,       0]),       # from input file
                                    },  coords={'wspd': [10, 15]} )              # 15 m/s is 'else', since method='nearest' is used on the variable `bins`
 
 
@@ -2123,6 +2123,13 @@ class FFCaseCreation:
                                     'RotSpeed': (['wspd'], [240.0, 240.0]),
                                     'BlPitch':  (['wspd'], [0.0, 0.0]),
                                    }, coords={'wspd': [4.19, 15]})
+
+        elif _isclose(self.D, 126): # NREL 5MW
+            self.bins = xr.Dataset({'WaveHs':      (['wspd'], [ 1, 1]),         # arbitrary since no hydrodyn is used
+                                    'WaveTp':      (['wspd'], [ 7, 7]),         # arbitrary since no hydrodyn is used
+                                    'RotSpeed':    (['wspd'], [ 9.156, 9.156]), # fixed speed for no-controller case
+                                    'BlPitch':     (['wspd'], [ 0,     0]),
+                                   },  coords={'wspd': [10, 15]} )              # 15 m/s is 'else', since method='nearest' is used on the variable `bins`
 
         else:
             FAIL(f'Unknown turbine with diameter {self.D}. Add values to the `_setRotorParameters` function.')
